@@ -1,13 +1,11 @@
 use aes::Aes256;
-use crypto_common::InvalidLength;
-use cmac::{Cmac, Mac};
-use std::error::Error;
+use serde::{Deserialize, Serialize};
 
 const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
-const PSP_DERIVED_KEY_SIZE: usize = 32;
-const PSP_SPI_KEY_SELECTOR_BIT: u32 = 1 << 31;
+const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
 
+#[derive(Debug)]
 enum PspVersion {
     PspVer0, // AES-GCM-128
     PspVer1, // AES-GCM-256
@@ -15,18 +13,20 @@ enum PspVersion {
     PspVer3, // AES-GMAC-256
 }
 
-enum PspEncap {
+#[derive(Debug)]
+pub enum PspEncap {
     TRANSPORT,
     TUNNEL,
 }
 
-#[derive(PartialEq)]
-enum CryptoAlg {
+#[derive(PartialEq, Debug)]
+pub enum CryptoAlg {
     AesGcm128,
     AesGcm256,
 }
 
-struct PspHeader {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PspHeader {
     next_hdr: u8,
     hdr_ext_len: u8,
     crypt_off: u8,
@@ -35,18 +35,19 @@ struct PspHeader {
     iv: u64,
 }
 
+type PspIcv = [u8; PSP_ICV_SIZE];
+
+#[derive(Debug)]
 struct PspTrailer {
-    icv: [u8; PSP_ICV_SIZE],
+    icv: PspIcv,
 }
 
 type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
-struct PspDerivedKey {
-    size: usize,
-    value: [u8; PSP_DERIVED_KEY_SIZE],
-}
+type PspDerivedKey = Vec<u8>;
 
-struct PspEncryptConfig {
+#[derive(Debug)]
+pub struct PspEncryptConfig {
     master_key0: PspMasterKey,
     master_key1: PspMasterKey,
     spi: u32,
@@ -58,7 +59,8 @@ struct PspEncryptConfig {
     include_vc: bool,
 }
 
-struct PktContext {
+#[derive(Debug)]
+pub struct PktContext {
     max_pkt_octets: u32,
     psp_cfg: PspEncryptConfig,
     key: PspDerivedKey,
@@ -72,7 +74,7 @@ struct PktContext {
 }
 
 impl PktContext {
-    fn new() -> PktContext {
+    pub fn new() -> PktContext {
         PktContext {
             max_pkt_octets: 1024,
             psp_cfg: PspEncryptConfig {
@@ -85,21 +87,49 @@ impl PktContext {
                 ipv4_tunnel_crypt_off: 0,
                 ipv6_tunnel_crypt_off: 0,
                 include_vc: false },
-            key: PspDerivedKey { size: 16, value: [0; 32] },
+            key: vec![0; 16],
             next_iv: 1,
             eth_hdr_len: 18
         }
     }
 }
 
+//#[derive(thiserror::Error, Debug)]
+// enum PspError {
+//     #[error("Crypto Error: {0}")]
+//     Crypto(aes_gcm::Error),
+//     #[error{"Serialization Error: {0}"}]
+//     Serialize(#[from] bincode::ErrorKind)
+// }
+
+#[derive(Debug)]
+pub enum PspError {
+    Crypto(aes_gcm::Error),
+    Serialize(String)
+}
+
+impl From<aes_gcm::Error> for PspError {
+    fn from(other: aes_gcm::Error) -> PspError {
+        PspError::Crypto(other)
+    }
+}
+
+impl From<bincode::Error> for PspError {
+    fn from(other: bincode::Error) -> PspError {
+        PspError::Serialize(other.to_string())
+    }
+}
+
 fn select_master_key<'a>(spi: u32, key0: &'a PspMasterKey, key1: &'a PspMasterKey) -> &'a PspMasterKey {
-    if (spi >> 31) & 0x01 == 0 {
+    if (spi >> PSP_SPI_KEY_SELECTOR_BIT) & 0x01 == 0 {
         return key0;
     }
     key1
 }
 
-fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) -> Result<(), Box<dyn Error>> {
+fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) -> Result<(), PspError> {
+    use cmac::{Cmac, Mac};
+
     let spi = pkt_ctx.psp_cfg.spi;
 
     let mut input_block: [u8; 16] = [0; 16];
@@ -137,18 +167,42 @@ fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8])
     Ok(())
 }
 
-fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), Box<dyn Error>> {
-    let mut key = [0; 32];
+pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
+    let mut key = [0; 16];
 
-    derive_psp_key_128(pkt_ctx, 1, &mut key[0..16])?;
-    if pkt_ctx.psp_cfg.crypto_alg == CryptoAlg::AesGcm128 {
-        pkt_ctx.key.size = 16;
-        pkt_ctx.key.value = key;
-        return Ok(());
+    derive_psp_key_128(pkt_ctx, 1, &mut key)?;
+    pkt_ctx.key = Vec::from(key);
+    if pkt_ctx.psp_cfg.crypto_alg == CryptoAlg::AesGcm256 {
+        derive_psp_key_128(pkt_ctx, 2, &mut key)?;
+        pkt_ctx.key.extend_from_slice(&key);
     }
-    derive_psp_key_128(pkt_ctx, 2, &mut key[16..])?;
-    pkt_ctx.key.size = 32;
-    pkt_ctx.key.value = key;
+    Ok(())
+}
+
+pub fn psp_encrypt(pkt_ctx: &PktContext,
+    psp_hdr: &PspHeader,
+    cleartext: &[u8],
+    ciphertext: &mut [u8],
+    icv: &mut [u8]) -> Result<(), PspError> {
+
+    use aes_gcm::{
+        aead::{KeyInit, Aead, Payload},
+        Aes128Gcm
+    };
+
+    let mut gcm_iv: [u8; 12] = [0; 12];
+    gcm_iv[0..4].copy_from_slice(&psp_hdr.spi.to_ne_bytes());
+    gcm_iv[4..12].copy_from_slice(&psp_hdr.iv.to_ne_bytes());
+
+    let aad = bincode::serialize(psp_hdr)?;
+    let cipher = Aes128Gcm::new(pkt_ctx.key.as_slice().into());
+    let payload = Payload {
+        msg: &cleartext,
+        aad: &aad,
+    };
+    let ct = cipher.encrypt(&gcm_iv.into(), payload)?;
+    ciphertext.copy_from_slice(&ct[0..ct.len()-PSP_ICV_SIZE]);
+    icv.copy_from_slice(&ct[(ct.len()-PSP_ICV_SIZE) .. ct.len()]);
 
     Ok(())
 }
@@ -207,8 +261,8 @@ mod tests {
             0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
             0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
         assert!(derive_psp_key(&mut pkt_ctx).is_ok());
-        assert_eq!(pkt_ctx.key.size, 16);
-        assert_eq!(pkt_ctx.key.value[0..16], expected);
+        assert_eq!(pkt_ctx.key.len(), 16);
+        assert_eq!(pkt_ctx.key, expected);
 
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm256;
         let expected: [u8; 32] = [
@@ -217,7 +271,31 @@ mod tests {
             0x37, 0xe4, 0x36, 0xf3, 0x82, 0x83, 0x44, 0x9b,
             0x76, 0x46, 0x3e, 0x9b, 0x7f, 0xb2, 0xe3, 0xde];
         assert!(derive_psp_key(&mut pkt_ctx).is_ok());
-        assert_eq!(pkt_ctx.key.size, 32);
-        assert_eq!(pkt_ctx.key.value, expected);
+        assert_eq!(pkt_ctx.key.len(), 32);
+        assert_eq!(pkt_ctx.key, expected);
+    }
+
+    #[test]
+    fn test_psp_encrypt() {
+        let mut pkt_ctx = PktContext::new();
+        pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
+        pkt_ctx.key = vec![
+            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
+            0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
+        let psp_hdr = PspHeader {
+            next_hdr: 1,
+            hdr_ext_len: 4,
+            crypt_off: 0,
+            s_d_ver_v_1: 0,
+            spi: 0x12345678,
+            iv: 0x12345678_9ABCDEFF,
+        };
+        let cleartext = vec![0u8; 256];
+        let mut ciphertext = vec![0u8; 256];
+        let mut icv = vec![0u8; PSP_ICV_SIZE];
+
+        let res = psp_encrypt(&pkt_ctx, &psp_hdr, &cleartext, &mut ciphertext, &mut icv);
+        assert!(res.is_ok());
+        assert_ne!(ciphertext, cleartext);
     }
 }
