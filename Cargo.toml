@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 aes = "0.8.3"
 cmac = "0.7.2"
+crypto-common = "0.1.6"

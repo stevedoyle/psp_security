@@ -1,5 +1,7 @@
 use aes::Aes256;
+use crypto_common::InvalidLength;
 use cmac::{Cmac, Mac};
+use std::error::Error;
 
 const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
@@ -37,9 +39,7 @@ struct PspTrailer {
     icv: [u8; PSP_ICV_SIZE],
 }
 
-struct PspMasterKey {
-    key: [u8; PSP_MASTER_KEY_SIZE],
-}
+type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
 struct PspDerivedKey {
     size: usize,
@@ -76,8 +76,8 @@ impl PktContext {
         PktContext {
             max_pkt_octets: 1024,
             psp_cfg: PspEncryptConfig {
-                master_key0: PspMasterKey { key: [0; 32] },
-                master_key1: PspMasterKey { key: [0; 32] },
+                master_key0: [0; 32],
+                master_key1: [0; 32],
                 spi: 1,
                 psp_encap: PspEncap::TRANSPORT,
                 crypto_alg: CryptoAlg::AesGcm128,
@@ -99,7 +99,7 @@ fn select_master_key<'a>(spi: u32, key0: &'a PspMasterKey, key1: &'a PspMasterKe
     key1
 }
 
-fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) -> Result<(), String> {
+fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) -> Result<(), Box<dyn Error>> {
     let spi = pkt_ctx.psp_cfg.spi;
 
     let mut input_block: [u8; 16] = [0; 16];
@@ -129,8 +129,7 @@ fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8])
         &pkt_ctx.psp_cfg.master_key0,
         &pkt_ctx.psp_cfg.master_key1);
 
-    // TODO: Replace unwrap() with a custom error type.
-    let mut mac = Cmac::<Aes256>::new_from_slice(&key.key).unwrap();
+    let mut mac = Cmac::<Aes256>::new(key.into());
     mac.update(&input_block);
     let result = mac.finalize();
     derived_key.copy_from_slice(&result.into_bytes());
@@ -138,7 +137,7 @@ fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8])
     Ok(())
 }
 
-fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), String> {
+fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), Box<dyn Error>> {
     let mut key = [0; 32];
 
     derive_psp_key_128(pkt_ctx, 1, &mut key[0..16])?;
@@ -162,13 +161,13 @@ mod tests {
     fn test_derive_psp_key_128() {
         let mut derived_key: [u8; 16] = [0; 16];
         let mut pkt_ctx = PktContext::new();
-        pkt_ctx.psp_cfg.master_key0.key = [
+        pkt_ctx.psp_cfg.master_key0 = [
             0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
             0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
             0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04,
             0xf8, 0xdb, 0x3e, 0x52, 0x43, 0xa2, 0xb0, 0xca,
         ];
-        pkt_ctx.psp_cfg.master_key1.key = [
+        pkt_ctx.psp_cfg.master_key1 = [
             0x56, 0x39, 0x52, 0x56, 0x5d, 0x3a, 0x78, 0xae,
             0x77, 0x3e, 0xc1, 0xb7, 0x79, 0xf2, 0xf2, 0xd9,
             0x9f, 0x4a, 0x7f, 0x53, 0xa6, 0xfb, 0xb9, 0xb0,
@@ -195,7 +194,7 @@ mod tests {
     #[test]
     fn test_derive_psp_key() {
         let mut pkt_ctx = PktContext::new();
-        pkt_ctx.psp_cfg.master_key0.key = [
+        pkt_ctx.psp_cfg.master_key0 = [
             0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
             0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
             0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04,
