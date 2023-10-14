@@ -1,9 +1,13 @@
 use aes::Aes256;
+use bitfield::bitfield;
 use serde::{Deserialize, Serialize};
+use derive_builder::Builder;
+use packet::{Packet, Builder, ether, ip, udp};
 
 const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
 const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
+const PSP_CRYPT_OFFSET_UNITS: u8 = 4;
 
 #[derive(Debug)]
 enum PspVersion {
@@ -25,12 +29,43 @@ pub enum CryptoAlg {
     AesGcm256,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+bitfield! {
+    #[derive(Copy, Clone, Serialize, PartialEq)]
+    pub struct PspHeaderFlags(u8);
+    impl Debug;
+    s, set_s: 0;
+    d, set_d: 1;
+    version, set_version: 5, 2;
+    vc, set_vc: 6;
+    r, set_r: 7;
+}
+
+impl Default for PspHeaderFlags {
+    fn default() -> Self {
+        let mut flags = PspHeaderFlags(0);
+        flags.set_s(false);
+        flags.set_d(false);
+        flags.set_version(PspVersion::PspVer0 as u8);
+        flags.set_vc(false);
+        flags.set_r(true);
+        flags
+    }
+}
+
+
+#[derive(Builder, Serialize, Debug, Default)]
+#[builder(default)]
 pub struct PspHeader {
+    /// An IP protocol number, identifying the type of the next header.
+    /// For example:
+    /// - 6 for transport mode when next header is TCP
+    /// - 17 for transport mode when next header is UDP
+    /// - 4 for tunnel mode when next header is IPv4
+    /// - 41 for tunnel mode when next header is IPv6
     next_hdr: u8,
     hdr_ext_len: u8,
     crypt_off: u8,
-    s_d_ver_v_1: u8,
+    flags: PspHeaderFlags,
     spi: u32,
     iv: u64,
 }
@@ -61,27 +96,25 @@ pub struct PspEncryptConfig {
 }
 
 #[derive(Debug)]
-pub struct PktContext {
-    max_pkt_octets: u32,
+pub struct PktContext<'a> {
+    //max_pkt_octets: usize,
     psp_cfg: PspEncryptConfig,
     key: PspDerivedKey,
     next_iv: u64,
     //TODO: in_pcap_pkt_hdr
-//    in_pkt: &'a[u8],
-    eth_hdr_len: u32,
+    in_pkt: &'a[u8],
+    //eth_hdr_len: usize,
     //TODO: out_pcap_pkt_hdr
-//    out_pkt: &'a[u8],
+    out_pkt: &'a[u8],
 //    scratch_buf: &'a[u8],
 }
 
-impl PktContext {
-    pub fn new() -> PktContext {
+impl PktContext<'_> {
+    pub fn new<'a>(in_pkt: &'a[u8], out_pkt: &'a[u8]) -> PktContext<'a> {
         PktContext {
-            max_pkt_octets: 1024,
+            //max_pkt_octets: 1024,
             psp_cfg: PspEncryptConfig {
                 master_keys: [[0; 32], [0; 32]],
-//                master_key0: [0; 32],
-//                master_key1: [0; 32],
                 spi: 1,
                 psp_encap: PspEncap::TRANSPORT,
                 crypto_alg: CryptoAlg::AesGcm128,
@@ -89,9 +122,11 @@ impl PktContext {
                 ipv4_tunnel_crypt_off: 0,
                 ipv6_tunnel_crypt_off: 0,
                 include_vc: false },
-            key: vec![0; 16],
-            next_iv: 1,
-            eth_hdr_len: 18
+                key: vec![0; 16],
+                in_pkt: in_pkt,
+                out_pkt: out_pkt,
+                next_iv: 1,
+                //eth_hdr_len: 18
         }
     }
 }
@@ -107,7 +142,8 @@ impl PktContext {
 #[derive(Debug)]
 pub enum PspError {
     Crypto(aes_gcm::Error),
-    Serialize(String)
+    Serialize(String),
+    BadPacket(packet::Error),
 }
 
 impl From<aes_gcm::Error> for PspError {
@@ -119,6 +155,12 @@ impl From<aes_gcm::Error> for PspError {
 impl From<bincode::Error> for PspError {
     fn from(other: bincode::Error) -> PspError {
         PspError::Serialize(other.to_string())
+    }
+}
+
+impl From<packet::Error> for PspError {
+    fn from(other: packet::Error) -> PspError {
+        PspError::BadPacket(other)
     }
 }
 
@@ -208,14 +250,56 @@ pub fn psp_encrypt(pkt_ctx: &PktContext,
     Ok(())
 }
 
+/// Encapsulate a packet in transport mode.
+/// Input packet:
+///     +---------+--------+---------+
+///     | Eth Hdr | IP Hdr | Payload |
+///     +---------+--------+---------+
+///
+/// Output packet:
+///     +---------+--------+---------+---------+---------+-------------+
+///     | Eth Hdr | IP Hdr ] UDP Hdr | PSP Hdr | Payload | PSP Trailer |
+///     +---------+--------+---------+---------+---------+-------------+
+///
+pub fn psp_transport_encap(pkt_ctx: &PktContext) -> Result<(), PspError> {
+    let in_pkt = pkt_ctx.in_pkt;
+
+    let eth = ether::Packet::new(in_pkt)?;
+    let ip = ip::Packet::new(eth.payload())?;
+    let payload = ip.payload();
+
+    println!("Size: {}, Payload: {:?}", payload.len(), payload);
+    println!("{:?}", ip);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     #[test]
+    fn check_psp_header_builder() {
+        let hdr = PspHeaderBuilder::default()
+            .next_hdr(17)
+            .spi(0x12345678)
+            .iv(0x12345678_9ABCDEF0)
+            .build().unwrap();
+
+        assert_eq!(hdr.spi, 0x12345678);
+        assert_eq!(hdr.iv, 0x12345678_9ABCDEF0);
+        assert_eq!(hdr.next_hdr, 17);
+        assert_eq!(hdr.flags.0, 0x80u8);
+    }
+
+    #[test]
     fn test_derive_psp_key_128() {
+        let in_pkt = vec![0u8; 1024];
+        let out_pkt = vec![0u8; 1024];
         let mut derived_key: [u8; 16] = [0; 16];
-        let mut pkt_ctx = PktContext::new();
+        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
         pkt_ctx.psp_cfg.master_keys[0] = [
             0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
             0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
@@ -248,7 +332,9 @@ mod tests {
 
     #[test]
     fn test_derive_psp_key() {
-        let mut pkt_ctx = PktContext::new();
+        let in_pkt = vec![0u8; 1024];
+        let out_pkt = vec![0u8; 1024];
+        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
         pkt_ctx.psp_cfg.master_keys[0] = [
             0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
             0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
@@ -278,19 +364,18 @@ mod tests {
 
     #[test]
     fn test_psp_encrypt() {
-        let mut pkt_ctx = PktContext::new();
+        let in_pkt = vec![0u8; 1024];
+        let out_pkt = vec![0u8; 1024];
+        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
         pkt_ctx.key = vec![
             0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
             0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
-        let psp_hdr = PspHeader {
-            next_hdr: 1,
-            hdr_ext_len: 4,
-            crypt_off: 0,
-            s_d_ver_v_1: 0,
-            spi: 0x12345678,
-            iv: 0x12345678_9ABCDEFF,
-        };
+        let mut psp_hdr = PspHeader::default();
+        psp_hdr.next_hdr = 6;
+        psp_hdr.spi = 0x12345678;
+        psp_hdr.iv = 0x12345678_9ABCDEFF;
+
         let cleartext = vec![0u8; 256];
         let mut ciphertext = vec![0u8; 256];
         let mut icv = vec![0u8; PSP_ICV_SIZE];
@@ -298,5 +383,25 @@ mod tests {
         let res = psp_encrypt(&pkt_ctx, &psp_hdr, &cleartext, &mut ciphertext, &mut icv);
         assert!(res.is_ok());
         assert_ne!(ciphertext, cleartext);
+    }
+
+    #[test]
+    fn check_transport_encap() {
+        let in_pkt = ether::Builder::default()
+            .protocol(ether::Protocol::Ipv4).unwrap()
+            .ip().unwrap().v4().unwrap()
+            .source(Ipv4Addr::new(192, 168, 0, 1)).unwrap()
+            .destination(Ipv4Addr::new(192, 168, 1, 1)).unwrap()
+            .protocol(ip::Protocol::Udp).unwrap()
+            .udp().unwrap()
+            .destination(0x1234).unwrap()
+            .payload(b"testing").unwrap()
+            .build().unwrap();
+//        println!("in_pkt: size:{}", in_pkt.len());
+//        println!{"{:?}", in_pkt};
+        let out_pkt = vec![0u8; 1024];
+        let pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
+
+        assert!(psp_transport_encap(&pkt_ctx).is_ok());
     }
 }
