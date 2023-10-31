@@ -1,19 +1,47 @@
-use clap::{Parser};
+use std::{
+    cmp::min,
+    fs::File,
+    net::{Ipv4Addr, Ipv6Addr},
+    num::Wrapping,
+    time::Duration,
+};
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use pcap_file::pcap::{PcapPacket, PcapWriter};
+use pnet::{packet::ethernet::EtherTypes, util::MacAddr};
+use pnet_packet::{
+    ethernet::MutableEthernetPacket,
+    ip::IpNextHeaderProtocols,
+    ipv4::{Ipv4Flags, MutableIpv4Packet},
+    ipv6::MutableIpv6Packet,
+    udp::MutableUdpPacket,
+    MutablePacket,
+};
+use psp_security::{CryptoAlg, PspEncap, PspMasterKey};
+use rand::{thread_rng, RngCore};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum IPVersion {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PspConfig {
+    master_keys: [PspMasterKey; 2],
+    mode: PspEncap,
+    algo: CryptoAlg,
+    crypto_offset: u32,
+    include_vc: bool,
+}
 
 #[derive(Parser)]
 #[command(name = "psp")]
 #[command(bin_name = "psp")]
 #[command(version)]
 enum PspCliCommands {
-
-    /// Create a cleartext pcap file that can be used for testing.
-    ///
-    /// The created packets are of the form Eth-IP-UDP-Payload with
-    /// a fixed size of 1434 octents (unless the 0e option is specified).
-    ///
-    /// All of the created packets are for the same flow (i.e. they all
-    /// have the same MAC addresses, IP addresses and UDP port numbers).
-    ///
+    /// Create files that are useful for testing PSP encryption and decryption.
     Create(CreateArgs),
     /// Perform PSP encryption on plaintext packets read from a pcap file.
     ///
@@ -41,19 +69,43 @@ enum PspCliCommands {
     Decrypt(DecryptArgs),
 }
 
-#[derive(clap::Args, Debug)]
-#[command(about, long_about=None)]
+#[derive(Args, Debug)]
+//#[command(about, long_about)]
 struct CreateArgs {
+    /// Create a cleartext pcap file that can be used for testing.
+    #[command(subcommand)]
+    command: CreateCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum CreateCommands {
+    /// Create a cleartext pcap file that can be used for testing.
+    ///
+    /// The created packets are of the form Eth-IP-UDP-Payload with
+    /// a fixed size of 1434 octents (unless the 0e option is specified).
+    ///
+    /// All of the created packets are for the same flow (i.e. they all
+    /// have the same MAC addresses, IP addresses and UDP port numbers).
+    ///
+    Pcap(CreatePcapArgs),
+    /// Create a configuration file that can be used with the encrypt and decrypt
+    /// commands.
+    Config(CreateConfigArgs),
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about, long_about)]
+struct CreatePcapArgs {
     /// Number of packets to create
     #[arg(short, long, default_value_t = 1)]
     num: u16,
 
-    /// 4 for IPv4 packets and 6 for IPv6 packets
-    #[arg(short, default_value_t = 4)]
-    ver: u8,
+    /// IPv4 or IPv6 packets
+    #[arg(short, long, value_enum, default_value_t = IPVersion::Ipv4)]
+    ver: IPVersion,
 
     /// Create empty packets where empty means the size of the L4 payload is 0
-    #[arg(short, default_value_t = false)]
+    #[arg(short, long, default_value_t = false)]
     empty: bool,
 
     /// Name of the pcap output file
@@ -62,7 +114,33 @@ struct CreateArgs {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(about, long_about=None)]
+#[command(about, long_about)]
+struct CreateConfigArgs {
+    /// Encap mode: Tunnel or Transport
+    #[arg(short, long, value_enum, default_value_t = PspEncap::TRANSPORT)]
+    mode: PspEncap,
+
+    /// Crypto Algorithm
+    #[arg(short, long, value_enum, default_value_t = CryptoAlg::AesGcm256)]
+    alg: CryptoAlg,
+
+    /// Crypto Offset
+    ///
+    /// Non-negative integer with units of 4 bytes (e.g. 1)
+    #[arg(long, default_value_t = 0)]
+    crypto_offset: u32,
+
+    /// Include virtual cookie
+    #[arg(short, long, default_value_t = false)]
+    vc: bool,
+
+    /// Name of the output configuration file
+    #[arg(short, long, default_value_t = String::from("psp_encrypt.cfg"))]
+    cfg_file: String,
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about, long_about)]
 struct EncryptArgs {
     /// Enable verbose mode
     #[arg(short, long, default_value_t = false)]
@@ -87,7 +165,7 @@ struct EncryptArgs {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(about, long_about=None)]
+#[command(about, long_about, verbatim_doc_comment)]
 struct DecryptArgs {
     /// Enable verbose mode
     #[arg(short, long, default_value_t = false)]
@@ -106,29 +184,182 @@ struct DecryptArgs {
     output: String,
 }
 
-fn create_pcap_file(args: CreateArgs) {
-    println!("{:?}", args)
+fn create_ipv4_packet(
+    pkt_buf: &mut [u8],
+    packet_id: u16,
+    empty: bool,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    let eth_hdr_len = 14;
+    let ip_hdr_len = 20;
+    let udp_hdr_len = 8;
+    let pkt_hdrs_len = eth_hdr_len + ip_hdr_len + udp_hdr_len;
+
+    let mut pkt_len: u16 = pkt_buf.len().try_into()?;
+    if empty {
+        pkt_len = min(pkt_len, pkt_hdrs_len);
+    }
+    let payload_len: u16 = pkt_len - pkt_hdrs_len;
+    let mut eth = MutableEthernetPacket::new(
+        pkt_buf).ok_or("Error creating packet")?;
+    eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
+    eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
+    eth.set_ethertype(EtherTypes::Ipv4);
+
+    let mut eth_payload = eth.payload_mut();
+    let mut ip = MutableIpv4Packet::new(
+        &mut eth_payload).ok_or("Error creating packet")?;
+    ip.set_source(Ipv4Addr::new(10, 0, 0, 1));
+    ip.set_destination(Ipv4Addr::new(10, 0, 0, 2));
+    ip.set_version(4);
+    ip.set_header_length(5);
+    ip.set_total_length(pkt_len - eth_hdr_len);
+    ip.set_ttl(64);
+    ip.set_flags(Ipv4Flags::DontFragment);
+    ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+    let csum = pnet::packet::ipv4::checksum(&ip.to_immutable());
+    ip.set_checksum(csum);
+
+    let mut ip_payload = ip.payload_mut();
+    let mut udp = MutableUdpPacket::new(
+        &mut ip_payload).ok_or("Error creating packet")?;
+    udp.set_source(11111);
+    udp.set_destination(22222);
+    udp.set_length(payload_len + udp_hdr_len);
+
+    let payload = udp.payload_mut();
+    let mut id = Wrapping((packet_id % 256) as u8);
+    for offset in 0..payload_len {
+        payload[offset as usize] = id.0;
+        id += 1;
+    }
+    return Ok(pkt_len);
+}
+
+fn create_ipv6_packet(
+    pkt_buf: &mut [u8],
+    packet_id: u16,
+    empty: bool,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    let eth_hdr_len = 14;
+    let ip_hdr_len = 40;
+    let udp_hdr_len = 8;
+    let pkt_hdrs_len = eth_hdr_len + ip_hdr_len + udp_hdr_len;
+
+    let mut pkt_len: u16 = pkt_buf.len().try_into()?;
+    if empty {
+        pkt_len = min(pkt_len, pkt_hdrs_len);
+    }
+    let payload_len: u16 = pkt_len - pkt_hdrs_len;
+    let mut eth = MutableEthernetPacket::new(
+        pkt_buf).ok_or("Error creating packet")?;
+    eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
+    eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
+    eth.set_ethertype(EtherTypes::Ipv6);
+
+    let mut eth_payload = eth.payload_mut();
+    let mut ip = MutableIpv6Packet::new(
+        &mut eth_payload).ok_or("Error creating packet")?;
+    ip.set_source(Ipv6Addr::new(10, 0, 0, 1, 10, 0, 0, 1));
+    ip.set_destination(Ipv6Addr::new(10, 0, 0, 2, 10, 0, 0, 2));
+    ip.set_version(6);
+    ip.set_payload_length(pkt_len - eth_hdr_len - ip_hdr_len);
+    ip.set_hop_limit(64);
+    ip.set_next_header(IpNextHeaderProtocols::Udp);
+
+    let mut ip_payload = ip.payload_mut();
+    let mut udp = MutableUdpPacket::new(
+        &mut ip_payload).ok_or("Error creating packet")?;
+    udp.set_source(11111);
+    udp.set_destination(22222);
+    udp.set_length(payload_len + udp_hdr_len);
+
+    let payload = udp.payload_mut();
+    let mut id = Wrapping((packet_id % 256) as u8);
+    for offset in 0..payload_len {
+        payload[offset as usize] = id.0;
+        id += 1;
+    }
+    return Ok(pkt_len);
+}
+
+fn create_packet(
+    pkt_buf: &mut [u8],
+    packet_id: u16,
+    ver: IPVersion,
+    empty: bool,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    match ver {
+        IPVersion::Ipv4 => Ok(create_ipv4_packet(pkt_buf, packet_id, empty)?),
+        IPVersion::Ipv6 => Ok(create_ipv6_packet(pkt_buf, packet_id, empty)?),
+    }
+}
+
+fn create_pcap_file(args: CreatePcapArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let file_out = File::create(args.output)?;
+    let mut pcap_writer = PcapWriter::new(file_out)?;
+
+    let mut pkt_buf = [0u8; 1434];
+    for packet_id in 0..args.num {
+        let pkt_len = create_packet(&mut pkt_buf, packet_id, args.ver, args.empty)?;
+        let pcap_pkt = PcapPacket::new(
+            Duration::new(0, 0),
+            pkt_len as u32,
+            &pkt_buf[..pkt_len as usize],
+        );
+        pcap_writer.write_packet(&pcap_pkt).unwrap();
+    }
+    Ok(())
+}
+
+fn create_config_file(args: CreateConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = PspConfig::default();
+    thread_rng().fill_bytes(&mut cfg.master_keys[0]);
+    thread_rng().fill_bytes(&mut cfg.master_keys[1]);
+    cfg.crypto_offset = args.crypto_offset;
+    cfg.mode = args.mode;
+    cfg.include_vc = args.vc;
+    cfg.algo = args.alg;
+
+    std::fs::write(&args.cfg_file, serde_json::to_string_pretty(&cfg)?)?;
+    println!("Created file: {}", args.cfg_file);
+    Ok(())
+}
+
+fn create_command(args: CreateArgs) {
+    let err = match args.command {
+        CreateCommands::Pcap(pcap_args) => {
+            create_pcap_file(pcap_args)
+        },
+        CreateCommands::Config(cfg_args) => {
+            create_config_file(cfg_args)
+        },
+    };
+    match err {
+        Err(err) => eprintln!("Error: {}", err),
+        Ok(_) => (),
+    };
 }
 
 fn encrypt_pcap_file(args: EncryptArgs) {
-    println!("{:?}", args)
+    println!("{:?}", args);
+    todo!()
 }
 
 fn decrypt_pcap_file(args: DecryptArgs) {
-    println!("{:?}", args)
+    println!("{:?}", args);
+    todo!()
 }
 
 fn main() {
     match PspCliCommands::parse() {
         PspCliCommands::Create(args) => {
-            println!("create!");
-            create_pcap_file(args);
-        },
+            create_command(args);
+        }
         PspCliCommands::Encrypt(args) => {
             encrypt_pcap_file(args);
-        },
+        }
         PspCliCommands::Decrypt(args) => {
             decrypt_pcap_file(args);
-        },
+        }
     }
 }
