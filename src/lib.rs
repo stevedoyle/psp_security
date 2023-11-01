@@ -1,36 +1,48 @@
 use aes::Aes256;
 use bitfield::bitfield;
-use serde::{Deserialize, Serialize};
+use clap::ValueEnum;
 use derive_builder::Builder;
-use packet::{Packet, Builder, ether, ip, udp};
+use pnet_packet::{
+    ethernet::{EthernetPacket, MutableEthernetPacket},
+    ipv4::{Ipv4Packet, MutableIpv4Packet},
+    udp::MutableUdpPacket,
+    MutablePacket, Packet,
+};
+
+use serde::{Deserialize, Serialize};
+
+mod packet;
+use packet::psp::MutablePspPacket;
 
 const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
 const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
 const PSP_CRYPT_OFFSET_UNITS: u8 = 4;
+const PSP_UDP_PORT: u16 = 1000;
 
-#[derive(Debug)]
 enum PspVersion {
-    PspVer0, // AES-GCM-128
+    PspVer0,  // AES-GCM-128
     PspVer1, // AES-GCM-256
-    PspVer2, // AES-GMAC-128
-    PspVer3, // AES-GMAC-256
+    _PspVer2, // AES-GMAC-128
+    _PspVer3, // AES-GMAC-256
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 pub enum PspEncap {
+    #[default]
     TRANSPORT,
     TUNNEL,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default, Serialize, Deserialize, ValueEnum)]
 pub enum CryptoAlg {
     AesGcm128,
+    #[default]
     AesGcm256,
 }
 
 bitfield! {
-    #[derive(Copy, Clone, Serialize, PartialEq)]
+    #[derive(Copy, Clone, Serialize, PartialEq, Eq)]
     pub struct PspHeaderFlags(u8);
     impl Debug;
     s, set_s: 0;
@@ -42,7 +54,7 @@ bitfield! {
 
 impl Default for PspHeaderFlags {
     fn default() -> Self {
-        let mut flags = PspHeaderFlags(0);
+        let mut flags = Self(0);
         flags.set_s(false);
         flags.set_d(false);
         flags.set_version(PspVersion::PspVer0 as u8);
@@ -51,7 +63,6 @@ impl Default for PspHeaderFlags {
         flags
     }
 }
-
 
 #[derive(Builder, Serialize, Debug, Default)]
 #[builder(default)]
@@ -70,47 +81,46 @@ pub struct PspHeader {
     iv: u64,
 }
 
-type PspIcv = [u8; PSP_ICV_SIZE];
+type _PspIcv = [u8; PSP_ICV_SIZE];
 
-#[derive(Debug)]
-struct PspTrailer {
-    icv: PspIcv,
-}
+//#[derive(Debug)]
+//struct PspTrailer {
+//    icv: PspIcv,
+//}
 
-type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
+pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
 type PspDerivedKey = Vec<u8>;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct PspEncryptConfig {
-    master_keys: [PspMasterKey; 2],
-//    master_key0: PspMasterKey,
-//    master_key1: PspMasterKey,
-    spi: u32,
-    psp_encap: PspEncap,
-    crypto_alg: CryptoAlg,
-    transport_crypt_off: u8,
-    ipv4_tunnel_crypt_off: u8,
-    ipv6_tunnel_crypt_off: u8,
-    include_vc: bool,
+    pub master_keys: [PspMasterKey; 2],
+    pub spi: u32,
+    pub psp_encap: PspEncap,
+    pub crypto_alg: CryptoAlg,
+    pub transport_crypt_off: u8,
+    //    ipv4_tunnel_crypt_off: u8,
+    //    ipv6_tunnel_crypt_off: u8,
+    pub include_vc: bool,
 }
 
 #[derive(Debug)]
-pub struct PktContext<'a> {
+pub struct PktContext {
     //max_pkt_octets: usize,
-    psp_cfg: PspEncryptConfig,
-    key: PspDerivedKey,
-    next_iv: u64,
+    pub psp_cfg: PspEncryptConfig,
+    pub key: PspDerivedKey,
+    pub next_iv: u64,
     //TODO: in_pcap_pkt_hdr
-    in_pkt: &'a[u8],
+    //    pub in_pkt: &'a [u8],
     //eth_hdr_len: usize,
     //TODO: out_pcap_pkt_hdr
-    out_pkt: &'a[u8],
-//    scratch_buf: &'a[u8],
+    //    pub out_pkt: &'a mut [u8],
+    //    scratch_buf: &'a[u8],
 }
 
-impl PktContext<'_> {
-    pub fn new<'a>(in_pkt: &'a[u8], out_pkt: &'a[u8]) -> PktContext<'a> {
+impl PktContext {
+    //    pub fn new<'a>(in_pkt: &'a [u8], out_pkt: &'a mut [u8]) -> PktContext<'a> {
+    pub fn new() -> PktContext {
         PktContext {
             //max_pkt_octets: 1024,
             psp_cfg: PspEncryptConfig {
@@ -119,14 +129,15 @@ impl PktContext<'_> {
                 psp_encap: PspEncap::TRANSPORT,
                 crypto_alg: CryptoAlg::AesGcm128,
                 transport_crypt_off: 0,
-                ipv4_tunnel_crypt_off: 0,
-                ipv6_tunnel_crypt_off: 0,
-                include_vc: false },
-                key: vec![0; 16],
-                in_pkt: in_pkt,
-                out_pkt: out_pkt,
-                next_iv: 1,
-                //eth_hdr_len: 18
+                //                ipv4_tunnel_crypt_off: 0,
+                //                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            },
+            key: vec![0; 16],
+            //            in_pkt,
+            //            out_pkt,
+            next_iv: 1,
+            //eth_hdr_len: 18
         }
     }
 }
@@ -143,35 +154,36 @@ impl PktContext<'_> {
 pub enum PspError {
     Crypto(aes_gcm::Error),
     Serialize(String),
-    BadPacket(packet::Error),
+    //    BadPacket(packet::Error),
+    SkippedPacket(String),
 }
 
 impl From<aes_gcm::Error> for PspError {
-    fn from(other: aes_gcm::Error) -> PspError {
-        PspError::Crypto(other)
+    fn from(other: aes_gcm::Error) -> Self {
+        Self::Crypto(other)
     }
 }
 
 impl From<bincode::Error> for PspError {
-    fn from(other: bincode::Error) -> PspError {
-        PspError::Serialize(other.to_string())
+    fn from(other: bincode::Error) -> Self {
+        Self::Serialize(other.to_string())
     }
 }
 
-impl From<packet::Error> for PspError {
-    fn from(other: packet::Error) -> PspError {
-        PspError::BadPacket(other)
-    }
-}
+//impl From<packet::Error> for PspError {
+//    fn from(other: packet::Error) -> Self {
+//        Self::BadPacket(other)
+//    }
+//}
 
-fn select_master_key<'a>(spi: u32, keys: &'a [PspMasterKey]) -> &'a PspMasterKey {
+const fn select_master_key(spi: u32, keys: &[PspMasterKey]) -> &PspMasterKey {
     if (spi >> PSP_SPI_KEY_SELECTOR_BIT) & 0x01 == 0 {
         return &keys[0];
     }
     &keys[1]
 }
 
-fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) -> Result<(), PspError> {
+fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8]) {
     use cmac::{Cmac, Mac};
 
     let spi = pkt_ctx.psp_cfg.spi;
@@ -185,12 +197,12 @@ fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8])
         CryptoAlg::AesGcm128 => {
             input_block[6] = 0x30;
             input_block[15] = 0x80;
-        },
+        }
         CryptoAlg::AesGcm256 => {
             input_block[6] = 0x31;
             input_block[14] = 0x01;
             input_block[15] = 0x00;
-        },
+        }
     }
 
     input_block[8] = ((spi >> 24) & 0xff) as u8;
@@ -198,39 +210,39 @@ fn derive_psp_key_128(pkt_ctx: &PktContext, counter: u8, derived_key: &mut [u8])
     input_block[10] = ((spi >> 8) & 0xff) as u8;
     input_block[11] = (spi & 0xff) as u8;
 
-    let key = select_master_key(
-        spi,
-        &pkt_ctx.psp_cfg.master_keys);
+    let key = select_master_key(spi, &pkt_ctx.psp_cfg.master_keys);
 
     let mut mac = Cmac::<Aes256>::new(key.into());
     mac.update(&input_block);
     let result = mac.finalize();
     derived_key.copy_from_slice(&result.into_bytes());
-
-    Ok(())
 }
 
 pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
     let mut key = [0; 16];
 
-    derive_psp_key_128(pkt_ctx, 1, &mut key)?;
+    derive_psp_key_128(pkt_ctx, 1, &mut key);
     pkt_ctx.key = Vec::from(key);
     if pkt_ctx.psp_cfg.crypto_alg == CryptoAlg::AesGcm256 {
-        derive_psp_key_128(pkt_ctx, 2, &mut key)?;
+        derive_psp_key_128(pkt_ctx, 2, &mut key);
         pkt_ctx.key.extend_from_slice(&key);
     }
     Ok(())
 }
 
-pub fn psp_encrypt(pkt_ctx: &PktContext,
+/// Encrypt a PSP packet given the PSP header and the payload buffer. The
+/// encryption is an out-of-place operation with the ciphertext and the ICV tag
+/// returned in separate buffers.
+pub fn psp_encrypt(
+    pkt_ctx: &PktContext,
     psp_hdr: &PspHeader,
     cleartext: &[u8],
     ciphertext: &mut [u8],
-    icv: &mut [u8]) -> Result<(), PspError> {
-
+    icv: &mut [u8],
+) -> Result<(), PspError> {
     use aes_gcm::{
-        aead::{KeyInit, Aead, Payload},
-        Aes128Gcm
+        aead::{Aead, KeyInit, Payload},
+        Aes128Gcm,
     };
 
     let mut gcm_iv: [u8; 12] = [0; 12];
@@ -240,12 +252,12 @@ pub fn psp_encrypt(pkt_ctx: &PktContext,
     let aad = bincode::serialize(psp_hdr)?;
     let cipher = Aes128Gcm::new(pkt_ctx.key.as_slice().into());
     let payload = Payload {
-        msg: &cleartext,
+        msg: cleartext,
         aad: &aad,
     };
     let ct = cipher.encrypt(&gcm_iv.into(), payload)?;
-    ciphertext.copy_from_slice(&ct[0..ct.len()-PSP_ICV_SIZE]);
-    icv.copy_from_slice(&ct[(ct.len()-PSP_ICV_SIZE) .. ct.len()]);
+    ciphertext.copy_from_slice(&ct[0..ct.len() - PSP_ICV_SIZE]);
+    icv.copy_from_slice(&ct[(ct.len() - PSP_ICV_SIZE)..ct.len()]);
 
     Ok(())
 }
@@ -261,15 +273,59 @@ pub fn psp_encrypt(pkt_ctx: &PktContext,
 ///     | Eth Hdr | IP Hdr ] UDP Hdr | PSP Hdr | Payload | PSP Trailer |
 ///     +---------+--------+---------+---------+---------+-------------+
 ///
-pub fn psp_transport_encap(pkt_ctx: &PktContext) -> Result<(), PspError> {
-    let in_pkt = pkt_ctx.in_pkt;
+pub fn psp_transport_encap(
+    pkt_ctx: &mut PktContext,
+    in_pkt: &[u8],
+    out_pkt: &mut [u8],
+) -> Result<(), PspError> {
+    let in_eth = EthernetPacket::new(in_pkt).unwrap();
+    let in_ip = Ipv4Packet::new(in_eth.payload()).unwrap();
+    let payload = in_ip.payload();
 
-    let eth = ether::Packet::new(in_pkt)?;
-    let ip = ip::Packet::new(eth.payload())?;
-    let payload = ip.payload();
+    let crypt_off = pkt_ctx.psp_cfg.transport_crypt_off * PSP_CRYPT_OFFSET_UNITS;
+    if crypt_off as usize > payload.len() {
+        return Err(PspError::SkippedPacket("Crypt offset too big".to_string()));
+    }
 
-    println!("Size: {}, Payload: {:?}", payload.len(), payload);
-    println!("{:?}", ip);
+    // Build the PSP encapsulated packet
+    //   - copy the Ethernet and IP headers of the input packet.
+    //   - insert the PSP UDP header
+    //   - insert the PSP header
+    //   - Copy crypt_off bytes from input packet starting at the L4 header
+    //   - Compute ICV and insert encrypted data
+    //   - Insert ICV as the PSP trailer
+
+    let mut eth = MutableEthernetPacket::new(out_pkt).unwrap();
+    eth.clone_from(&in_eth);
+
+    let mut ip = MutableIpv4Packet::new(eth.payload_mut()).unwrap();
+    ip.clone_from(&in_ip);
+    ip.set_total_length(ip.packet().len() as u16);
+
+    // TODO: Replace unwrap() with proper handling
+    let mut udp = MutableUdpPacket::new(ip.payload_mut()).unwrap();
+    udp.set_destination(PSP_UDP_PORT);
+    // TODO: Replace with a simple hash of the inner transport header numbers
+    udp.set_source(PSP_UDP_PORT);
+    udp.set_checksum(0);
+    udp.set_length(udp.packet().len() as u16);
+
+    let mut psp = MutablePspPacket::new(udp.payload_mut()).unwrap();
+    psp.set_spi(pkt_ctx.psp_cfg.spi);
+    psp.set_crypt_offset(pkt_ctx.psp_cfg.transport_crypt_off);
+    psp.set_hdr_ext_len(1);
+    psp.set_vc(pkt_ctx.psp_cfg.include_vc as u8);
+    psp.set_iv(pkt_ctx.next_iv);
+    psp.set_next_hdr(in_ip.get_next_level_protocol().0);
+    pkt_ctx.next_iv += 1;
+    match pkt_ctx.psp_cfg.crypto_alg {
+        CryptoAlg::AesGcm128 => {
+            psp.set_version(PspVersion::PspVer0 as u8);
+        },
+        CryptoAlg::AesGcm256 => {
+            psp.set_version(PspVersion::PspVer1 as u8);
+        },
+    };
 
     Ok(())
 }
@@ -277,6 +333,9 @@ pub fn psp_transport_encap(pkt_ctx: &PktContext) -> Result<(), PspError> {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+
+    use ::packet::{ether, ip, Builder};
+    use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 
     use super::*;
 
@@ -286,7 +345,8 @@ mod tests {
             .next_hdr(17)
             .spi(0x12345678)
             .iv(0x12345678_9ABCDEF0)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         assert_eq!(hdr.spi, 0x12345678);
         assert_eq!(hdr.iv, 0x12345678_9ABCDEF0);
@@ -296,67 +356,63 @@ mod tests {
 
     #[test]
     fn test_derive_psp_key_128() {
-        let in_pkt = vec![0u8; 1024];
-        let out_pkt = vec![0u8; 1024];
         let mut derived_key: [u8; 16] = [0; 16];
-        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
+        let mut pkt_ctx = PktContext::new();
         pkt_ctx.psp_cfg.master_keys[0] = [
-            0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
-            0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
-            0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04,
-            0xf8, 0xdb, 0x3e, 0x52, 0x43, 0xa2, 0xb0, 0xca,
+            0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B, 0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2,
+            0xd3, 0x4c, 0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04, 0xf8, 0xdb, 0x3e, 0x52,
+            0x43, 0xa2, 0xb0, 0xca,
         ];
         pkt_ctx.psp_cfg.master_keys[1] = [
-            0x56, 0x39, 0x52, 0x56, 0x5d, 0x3a, 0x78, 0xae,
-            0x77, 0x3e, 0xc1, 0xb7, 0x79, 0xf2, 0xf2, 0xd9,
-            0x9f, 0x4a, 0x7f, 0x53, 0xa6, 0xfb, 0xb9, 0xb0,
-            0x7d, 0x5b, 0x71, 0xf3, 0x93, 0x64, 0xd7, 0x39,
+            0x56, 0x39, 0x52, 0x56, 0x5d, 0x3a, 0x78, 0xae, 0x77, 0x3e, 0xc1, 0xb7, 0x79, 0xf2,
+            0xf2, 0xd9, 0x9f, 0x4a, 0x7f, 0x53, 0xa6, 0xfb, 0xb9, 0xb0, 0x7d, 0x5b, 0x71, 0xf3,
+            0x93, 0x64, 0xd7, 0x39,
         ];
 
         pkt_ctx.psp_cfg.spi = 0x12345678;
         let expected: [u8; 16] = [
-            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
-            0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
+            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90, 0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e,
+            0x4e, 0x30,
+        ];
 
-        assert!(derive_psp_key_128(&pkt_ctx, 1, &mut derived_key).is_ok());
+        derive_psp_key_128(&pkt_ctx, 1, &mut derived_key);
         assert_eq!(expected, derived_key);
 
         pkt_ctx.psp_cfg.spi = 0x9A345678;
         let expected: [u8; 16] = [
-            0x39, 0x46, 0xda, 0x25, 0x54, 0xea, 0xe4, 0x6a,
-            0xd1, 0xef, 0x77, 0xa6, 0x43, 0x72, 0xed, 0xc4];
+            0x39, 0x46, 0xda, 0x25, 0x54, 0xea, 0xe4, 0x6a, 0xd1, 0xef, 0x77, 0xa6, 0x43, 0x72,
+            0xed, 0xc4,
+        ];
 
-        assert!(derive_psp_key_128(&pkt_ctx, 1, &mut derived_key).is_ok());
+        derive_psp_key_128(&pkt_ctx, 1, &mut derived_key);
         assert_eq!(expected, derived_key);
     }
 
     #[test]
     fn test_derive_psp_key() {
-        let in_pkt = vec![0u8; 1024];
-        let out_pkt = vec![0u8; 1024];
-        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
+        let mut pkt_ctx = PktContext::new();
         pkt_ctx.psp_cfg.master_keys[0] = [
-            0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B,
-            0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2, 0xd3, 0x4c,
-            0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04,
-            0xf8, 0xdb, 0x3e, 0x52, 0x43, 0xa2, 0xb0, 0xca,
+            0x34, 0x44, 0x8A, 0x06, 0x42, 0x92, 0x60, 0x1B, 0x11, 0xA0, 0x97, 0x8F, 0x56, 0xA2,
+            0xd3, 0x4c, 0xf3, 0xfc, 0x35, 0xed, 0xe1, 0xa6, 0xbc, 0x04, 0xf8, 0xdb, 0x3e, 0x52,
+            0x43, 0xa2, 0xb0, 0xca,
         ];
         pkt_ctx.psp_cfg.spi = 0x12345678;
 
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
         let expected: [u8; 16] = [
-            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
-            0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
+            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90, 0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e,
+            0x4e, 0x30,
+        ];
         assert!(derive_psp_key(&mut pkt_ctx).is_ok());
         assert_eq!(pkt_ctx.key.len(), 16);
         assert_eq!(pkt_ctx.key, expected);
 
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm256;
         let expected: [u8; 32] = [
-            0x2b, 0x7d, 0x72, 0x07, 0x4e, 0x42, 0xca, 0x33,
-            0x44, 0x87, 0xf2, 0x99, 0x0e, 0x3f, 0x8c, 0x40,
-            0x37, 0xe4, 0x36, 0xf3, 0x82, 0x83, 0x44, 0x9b,
-            0x76, 0x46, 0x3e, 0x9b, 0x7f, 0xb2, 0xe3, 0xde];
+            0x2b, 0x7d, 0x72, 0x07, 0x4e, 0x42, 0xca, 0x33, 0x44, 0x87, 0xf2, 0x99, 0x0e, 0x3f,
+            0x8c, 0x40, 0x37, 0xe4, 0x36, 0xf3, 0x82, 0x83, 0x44, 0x9b, 0x76, 0x46, 0x3e, 0x9b,
+            0x7f, 0xb2, 0xe3, 0xde,
+        ];
         assert!(derive_psp_key(&mut pkt_ctx).is_ok());
         assert_eq!(pkt_ctx.key.len(), 32);
         assert_eq!(pkt_ctx.key, expected);
@@ -364,13 +420,12 @@ mod tests {
 
     #[test]
     fn test_psp_encrypt() {
-        let in_pkt = vec![0u8; 1024];
-        let out_pkt = vec![0u8; 1024];
-        let mut pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
+        let mut pkt_ctx = PktContext::new();
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
         pkt_ctx.key = vec![
-            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90,
-            0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e, 0x4e, 0x30];
+            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90, 0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e,
+            0x4e, 0x30,
+        ];
         let mut psp_hdr = PspHeader::default();
         psp_hdr.next_hdr = 6;
         psp_hdr.spi = 0x12345678;
@@ -388,20 +443,32 @@ mod tests {
     #[test]
     fn check_transport_encap() {
         let in_pkt = ether::Builder::default()
-            .protocol(ether::Protocol::Ipv4).unwrap()
-            .ip().unwrap().v4().unwrap()
-            .source(Ipv4Addr::new(192, 168, 0, 1)).unwrap()
-            .destination(Ipv4Addr::new(192, 168, 1, 1)).unwrap()
-            .protocol(ip::Protocol::Udp).unwrap()
-            .udp().unwrap()
-            .destination(0x1234).unwrap()
-            .payload(b"testing").unwrap()
-            .build().unwrap();
-//        println!("in_pkt: size:{}", in_pkt.len());
-//        println!{"{:?}", in_pkt};
-        let out_pkt = vec![0u8; 1024];
-        let pkt_ctx = PktContext::new(&in_pkt, &out_pkt);
+            .protocol(::packet::ether::Protocol::Ipv4)
+            .unwrap()
+            .ip()
+            .unwrap()
+            .v4()
+            .unwrap()
+            .source(Ipv4Addr::new(192, 168, 0, 1))
+            .unwrap()
+            .destination(Ipv4Addr::new(192, 168, 1, 1))
+            .unwrap()
+            .protocol(ip::Protocol::Udp)
+            .unwrap()
+            .udp()
+            .unwrap()
+            .destination(0x1234)
+            .unwrap()
+            .payload(b"testing")
+            .unwrap()
+            .build()
+            .unwrap();
 
-        assert!(psp_transport_encap(&pkt_ctx).is_ok());
+        let mut out_pkt = vec![0u8; 1024];
+        let mut pkt_ctx = PktContext::new();
+
+        assert!(psp_transport_encap(&mut pkt_ctx, &in_pkt, &mut out_pkt).is_ok());
+        let eth = EthernetPacket::new(&out_pkt).unwrap();
+        assert_eq!(eth.get_ethertype(), EtherTypes::Ipv4);
     }
 }
