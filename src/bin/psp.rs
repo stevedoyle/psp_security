@@ -127,7 +127,7 @@ struct CreateConfigArgs {
     spi: u32,
 
     /// Encap mode: Tunnel or Transport
-    #[arg(short, long, value_enum, default_value_t = PspEncap::TRANSPORT)]
+    #[arg(short, long, value_enum, default_value_t = PspEncap::Transport)]
     mode: PspEncap,
 
     /// Crypto Algorithm
@@ -359,13 +359,13 @@ fn read_pkts_from_pcap(pcap_file: &str) -> Result<Vec<PcapPacket<'_>>, Box<dyn E
 
 fn encrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Vec<u8> {
     match pkt_ctx.psp_cfg.psp_encap {
-        PspEncap::TRANSPORT => {
+        PspEncap::Transport => {
             let out_len = pkt_in.orig_len + 16 + 8;
             let mut pkt_out = vec![0u8; out_len as usize];
             psp_transport_encap(pkt_ctx, &pkt_in.data, &mut pkt_out).unwrap();
             pkt_out
         }
-        PspEncap::TUNNEL => {
+        PspEncap::Tunnel => {
             todo!()
         }
     }

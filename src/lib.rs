@@ -21,17 +21,15 @@ const PSP_CRYPT_OFFSET_UNITS: u8 = 4;
 const PSP_UDP_PORT: u16 = 1000;
 
 enum PspVersion {
-    PspVer0,  // AES-GCM-128
+    PspVer0, // AES-GCM-128
     PspVer1, // AES-GCM-256
-    _PspVer2, // AES-GMAC-128
-    _PspVer3, // AES-GMAC-256
 }
 
 #[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 pub enum PspEncap {
     #[default]
-    TRANSPORT,
-    TUNNEL,
+    Transport,
+    Tunnel,
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Default, Serialize, Deserialize, ValueEnum)]
@@ -92,7 +90,7 @@ pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
 type PspDerivedKey = Vec<u8>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PspEncryptConfig {
     pub master_keys: [PspMasterKey; 2],
     pub spi: u32,
@@ -104,29 +102,20 @@ pub struct PspEncryptConfig {
     pub include_vc: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PktContext {
-    //max_pkt_octets: usize,
     pub psp_cfg: PspEncryptConfig,
     pub key: PspDerivedKey,
     pub next_iv: u64,
-    //TODO: in_pcap_pkt_hdr
-    //    pub in_pkt: &'a [u8],
-    //eth_hdr_len: usize,
-    //TODO: out_pcap_pkt_hdr
-    //    pub out_pkt: &'a mut [u8],
-    //    scratch_buf: &'a[u8],
 }
 
 impl PktContext {
-    //    pub fn new<'a>(in_pkt: &'a [u8], out_pkt: &'a mut [u8]) -> PktContext<'a> {
     pub fn new() -> PktContext {
         PktContext {
-            //max_pkt_octets: 1024,
             psp_cfg: PspEncryptConfig {
                 master_keys: [[0; 32], [0; 32]],
                 spi: 1,
-                psp_encap: PspEncap::TRANSPORT,
+                psp_encap: PspEncap::Transport,
                 crypto_alg: CryptoAlg::AesGcm128,
                 transport_crypt_off: 0,
                 //                ipv4_tunnel_crypt_off: 0,
@@ -134,10 +123,7 @@ impl PktContext {
                 include_vc: false,
             },
             key: vec![0; 16],
-            //            in_pkt,
-            //            out_pkt,
             next_iv: 1,
-            //eth_hdr_len: 18
         }
     }
 }
