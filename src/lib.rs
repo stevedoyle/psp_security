@@ -307,10 +307,10 @@ pub fn psp_transport_encap(
     match pkt_ctx.psp_cfg.crypto_alg {
         CryptoAlg::AesGcm128 => {
             psp.set_version(PspVersion::PspVer0 as u8);
-        },
+        }
         CryptoAlg::AesGcm256 => {
             psp.set_version(PspVersion::PspVer1 as u8);
-        },
+        }
     };
 
     Ok(())
@@ -321,7 +321,13 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use ::packet::{ether, ip, Builder};
-    use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
+    use pnet_packet::{
+        ethernet::{EtherTypes, EthernetPacket},
+        ip::IpNextHeaderProtocols,
+        udp::UdpPacket,
+    };
+
+    use crate::packet::psp::PspPacket;
 
     use super::*;
 
@@ -427,34 +433,33 @@ mod tests {
     }
 
     #[test]
-    fn check_transport_encap() {
+    fn check_transport_encap() -> Result<(), Box<dyn std::error::Error>> {
         let in_pkt = ether::Builder::default()
-            .protocol(::packet::ether::Protocol::Ipv4)
-            .unwrap()
-            .ip()
-            .unwrap()
-            .v4()
-            .unwrap()
-            .source(Ipv4Addr::new(192, 168, 0, 1))
-            .unwrap()
-            .destination(Ipv4Addr::new(192, 168, 1, 1))
-            .unwrap()
-            .protocol(ip::Protocol::Udp)
-            .unwrap()
-            .udp()
-            .unwrap()
-            .destination(0x1234)
-            .unwrap()
-            .payload(b"testing")
-            .unwrap()
-            .build()
-            .unwrap();
+            .protocol(::packet::ether::Protocol::Ipv4)?
+            .ip()?
+            .v4()?
+            .source(Ipv4Addr::new(192, 168, 0, 1))?
+            .destination(Ipv4Addr::new(192, 168, 1, 1))?
+            .protocol(ip::Protocol::Udp)?
+            .udp()?
+            .destination(0x1234)?
+            .payload(b"testing")?
+            .build()?;
 
         let mut out_pkt = vec![0u8; 1024];
-        let mut pkt_ctx = PktContext::new();
+        let mut pkt_ctx = PktContext::default();
 
         assert!(psp_transport_encap(&mut pkt_ctx, &in_pkt, &mut out_pkt).is_ok());
         let eth = EthernetPacket::new(&out_pkt).unwrap();
         assert_eq!(eth.get_ethertype(), EtherTypes::Ipv4);
+        let ip = Ipv4Packet::new(eth.payload()).unwrap();
+        assert_eq!(ip.get_next_level_protocol(), IpNextHeaderProtocols::Udp);
+        let udp = UdpPacket::new(ip.payload()).unwrap();
+        assert_eq!(udp.get_destination(), PSP_UDP_PORT);
+        let psp = PspPacket::new(udp.payload()).unwrap();
+        assert_eq!(psp.get_spi(), pkt_ctx.psp_cfg.spi);
+        assert_eq!(psp.get_version(), PspVersion::PspVer1 as u8);
+
+        Ok(())
     }
 }
