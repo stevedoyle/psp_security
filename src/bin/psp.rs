@@ -372,8 +372,8 @@ fn encrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Vec<u8> {
 }
 
 fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
-    let cfg = read_cfg_file(&args.cfg_file).expect("Error reading cfg file");
-    let pkts = read_pkts_from_pcap(&args.input).expect("Error reading pcap file");
+    let cfg = read_cfg_file(&args.cfg_file)?;
+    let pkts = read_pkts_from_pcap(&args.input)?;
 
     let file_out = File::create(&args.output)?;
     let mut pcap_writer = PcapWriter::new(file_out)?;
