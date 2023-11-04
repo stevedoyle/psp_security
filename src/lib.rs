@@ -1,3 +1,5 @@
+use std::fmt;
+
 use aes::Aes256;
 use bitfield::bitfield;
 use clap::ValueEnum;
@@ -79,7 +81,7 @@ pub struct PspHeader {
     iv: u64,
 }
 
-type _PspIcv = [u8; PSP_ICV_SIZE];
+type PspIcv = [u8; PSP_ICV_SIZE];
 
 //#[derive(Debug)]
 //struct PspTrailer {
@@ -102,7 +104,7 @@ pub struct PspEncryptConfig {
     pub include_vc: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PktContext {
     pub psp_cfg: PspEncryptConfig,
     pub key: PspDerivedKey,
@@ -111,6 +113,25 @@ pub struct PktContext {
 
 impl PktContext {
     pub fn new() -> PktContext {
+        PktContext {
+            psp_cfg: PspEncryptConfig {
+                master_keys: [[0; 32], [0; 32]],
+                spi: 1,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                //                ipv4_tunnel_crypt_off: 0,
+                //                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            },
+            key: vec![0; 16],
+            next_iv: 1,
+        }
+    }
+}
+
+impl Default for PktContext {
+    fn default() -> PktContext {
         PktContext {
             psp_cfg: PspEncryptConfig {
                 master_keys: [[0; 32], [0; 32]],
@@ -144,6 +165,8 @@ pub enum PspError {
     SkippedPacket(String),
 }
 
+impl std::error::Error for PspError {}
+
 impl From<aes_gcm::Error> for PspError {
     fn from(other: aes_gcm::Error) -> Self {
         Self::Crypto(other)
@@ -153,6 +176,22 @@ impl From<aes_gcm::Error> for PspError {
 impl From<bincode::Error> for PspError {
     fn from(other: bincode::Error) -> Self {
         Self::Serialize(other.to_string())
+    }
+}
+
+impl fmt::Display for PspError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PspError::Crypto(e) => {
+                write!(f, "PSP Crypto Error {e}")
+            }
+            PspError::Serialize(e) => {
+                write!(f, "PSP Serialize Error {e}")
+            }
+            PspError::SkippedPacket(e) => {
+                write!(f, "PSP SkippedPacket Error {e}")
+            }
+        }
     }
 }
 
@@ -313,6 +352,32 @@ pub fn psp_transport_encap(
         }
     };
 
+    let mut flags = PspHeaderFlags::default();
+    flags.set_d(psp.get_d() != 0);
+    flags.set_s(psp.get_s() != 0);
+    flags.set_version(psp.get_version());
+    flags.set_vc(psp.get_vc() != 0);
+
+    let psp_hdr = &PspHeader {
+        next_hdr: psp.get_next_hdr(),
+        hdr_ext_len: psp.get_hdr_ext_len(),
+        crypt_off: psp.get_crypt_offset(),
+        flags: flags,
+        spi: psp.get_spi(),
+        iv: psp.get_iv(),
+    };
+    let cleartext = in_ip.payload();
+    let ciphertext = psp.payload_mut();
+    let mut icv: PspIcv = [0u8; PSP_ICV_SIZE];
+    psp_encrypt(
+        pkt_ctx,
+        psp_hdr,
+        cleartext,
+        &mut ciphertext[..cleartext.len()],
+        &mut icv,
+    )?;
+    ciphertext[cleartext.len()..].copy_from_slice(&icv);
+
     Ok(())
 }
 
@@ -446,10 +511,17 @@ mod tests {
             .payload(b"testing")?
             .build()?;
 
-        let mut out_pkt = vec![0u8; 1024];
+        // TODO: Replace magic numbers.
+        let out_pkt_len = in_pkt.len()
+            + UdpPacket::minimum_packet_size()
+            + PspPacket::minimum_packet_size()
+            + PSP_ICV_SIZE;
+        let mut out_pkt = vec![0u8; out_pkt_len];
         let mut pkt_ctx = PktContext::default();
+        pkt_ctx.psp_cfg.spi = 1;
 
         assert!(psp_transport_encap(&mut pkt_ctx, &in_pkt, &mut out_pkt).is_ok());
+
         let eth = EthernetPacket::new(&out_pkt).unwrap();
         assert_eq!(eth.get_ethertype(), EtherTypes::Ipv4);
         let ip = Ipv4Packet::new(eth.payload()).unwrap();
@@ -458,7 +530,7 @@ mod tests {
         assert_eq!(udp.get_destination(), PSP_UDP_PORT);
         let psp = PspPacket::new(udp.payload()).unwrap();
         assert_eq!(psp.get_spi(), pkt_ctx.psp_cfg.spi);
-        assert_eq!(psp.get_version(), PspVersion::PspVer1 as u8);
+        assert_eq!(psp.get_version(), PspVersion::PspVer0 as u8);
 
         Ok(())
     }
