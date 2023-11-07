@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 mod packet;
 use packet::psp::MutablePspPacket;
 
-const PSP_ICV_SIZE: usize = 16;
+pub const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
 const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
 const PSP_CRYPT_OFFSET_UNITS: u8 = 4;
@@ -81,7 +81,7 @@ pub struct PspHeader {
     iv: u64,
 }
 
-type PspIcv = [u8; PSP_ICV_SIZE];
+//type PspIcv = [u8; PSP_ICV_SIZE];
 
 //#[derive(Debug)]
 //struct PspTrailer {
@@ -108,7 +108,7 @@ pub struct PspEncryptConfig {
 pub struct PktContext {
     pub psp_cfg: PspEncryptConfig,
     pub key: PspDerivedKey,
-    pub next_iv: u64,
+    pub iv: u64,
 }
 
 impl PktContext {
@@ -125,7 +125,7 @@ impl PktContext {
                 include_vc: false,
             },
             key: vec![0; 16],
-            next_iv: 1,
+            iv: 1,
         }
     }
 }
@@ -144,7 +144,7 @@ impl Default for PktContext {
                 include_vc: false,
             },
             key: vec![0; 16],
-            next_iv: 1,
+            iv: 1,
         }
     }
 }
@@ -159,17 +159,19 @@ impl Default for PktContext {
 
 #[derive(Debug)]
 pub enum PspError {
-    Crypto(aes_gcm::Error),
+    CryptoError(aes_gcm::Error),
     Serialize(String),
     //    BadPacket(packet::Error),
     SkippedPacket(String),
+    NoCiphertext,
+    PacketBuildError,
 }
 
 impl std::error::Error for PspError {}
 
 impl From<aes_gcm::Error> for PspError {
     fn from(other: aes_gcm::Error) -> Self {
-        Self::Crypto(other)
+        Self::CryptoError(other)
     }
 }
 
@@ -182,7 +184,7 @@ impl From<bincode::Error> for PspError {
 impl fmt::Display for PspError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            PspError::Crypto(e) => {
+            PspError::CryptoError(e) => {
                 write!(f, "PSP Crypto Error {e}")
             }
             PspError::Serialize(e) => {
@@ -190,6 +192,12 @@ impl fmt::Display for PspError {
             }
             PspError::SkippedPacket(e) => {
                 write!(f, "PSP SkippedPacket Error {e}")
+            }
+            PspError::NoCiphertext => {
+                write!(f, "PSP No Ciphertext Error")
+            }
+            PspError::PacketBuildError => {
+                write!(f, "PSP Packet Build Error")
             }
         }
     }
@@ -200,6 +208,13 @@ impl fmt::Display for PspError {
 //        Self::BadPacket(other)
 //    }
 //}
+
+const fn get_psp_version(spi: u32) -> PspVersion {
+    match (spi >> PSP_SPI_KEY_SELECTOR_BIT) & 0x01 {
+        1 => PspVersion::PspVer1,
+        _ => PspVersion::PspVer0,
+    }
+}
 
 const fn select_master_key(spi: u32, keys: &[PspMasterKey]) -> &PspMasterKey {
     if (spi >> PSP_SPI_KEY_SELECTOR_BIT) & 0x01 == 0 {
@@ -257,32 +272,77 @@ pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
 
 /// Encrypt a PSP packet given the PSP header and the payload buffer. The
 /// encryption is an out-of-place operation with the ciphertext and the ICV tag
-/// returned in separate buffers.
+/// returned in the same buffer.
 pub fn psp_encrypt(
     pkt_ctx: &PktContext,
-    psp_hdr: &PspHeader,
+    aad: &[u8],
     cleartext: &[u8],
     ciphertext: &mut [u8],
-    icv: &mut [u8],
+) -> Result<(), PspError> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit, Payload},
+        Aes128Gcm, Aes256Gcm,
+    };
+
+    let spi = pkt_ctx.psp_cfg.spi;
+    let iv = pkt_ctx.iv;
+    let mut gcm_iv: [u8; 12] = [0; 12];
+    gcm_iv[0..4].copy_from_slice(&spi.to_ne_bytes());
+    gcm_iv[4..12].copy_from_slice(&iv.to_ne_bytes());
+
+    let payload = Payload {
+        msg: cleartext,
+        aad,
+    };
+
+    let ct = match get_psp_version(spi) {
+        PspVersion::PspVer0 => Aes128Gcm::new(pkt_ctx.key[..16].into())
+            .encrypt(&gcm_iv.into(), payload)
+            .map_err(|e| PspError::CryptoError(e))?,
+        PspVersion::PspVer1 => Aes256Gcm::new(pkt_ctx.key[..].into())
+            .encrypt(&gcm_iv.into(), payload)
+            .map_err(|e| PspError::CryptoError(e))?,
+    };
+
+    ciphertext.copy_from_slice(&ct);
+
+    Ok(())
+}
+
+/// Decrypt a PSP packet. The decryption is an out-of-place operation returned
+/// in separate buffers. On input, the ciphertext buffer also contains the icv.
+pub fn psp_decrypt(
+    pkt_ctx: &mut PktContext,
+    aad: &[u8],
+    ciphertext: &[u8],
+    cleartext: &mut [u8],
 ) -> Result<(), PspError> {
     use aes_gcm::{
         aead::{Aead, KeyInit, Payload},
         Aes128Gcm,
     };
 
-    let mut gcm_iv: [u8; 12] = [0; 12];
-    gcm_iv[0..4].copy_from_slice(&psp_hdr.spi.to_ne_bytes());
-    gcm_iv[4..12].copy_from_slice(&psp_hdr.iv.to_ne_bytes());
+    if ciphertext.is_empty() {
+        return Err(PspError::NoCiphertext);
+    }
 
-    let aad = bincode::serialize(psp_hdr)?;
+    let spi = pkt_ctx.psp_cfg.spi;
+    let iv = pkt_ctx.iv;
+    let mut gcm_iv: [u8; 12] = [0; 12];
+    gcm_iv[0..4].copy_from_slice(&spi.to_ne_bytes());
+    gcm_iv[4..12].copy_from_slice(&iv.to_ne_bytes());
+
+    derive_psp_key(pkt_ctx)?;
+
     let cipher = Aes128Gcm::new(pkt_ctx.key.as_slice().into());
     let payload = Payload {
-        msg: cleartext,
-        aad: &aad,
+        msg: ciphertext,
+        aad,
     };
-    let ct = cipher.encrypt(&gcm_iv.into(), payload)?;
-    ciphertext.copy_from_slice(&ct[0..ct.len() - PSP_ICV_SIZE]);
-    icv.copy_from_slice(&ct[(ct.len() - PSP_ICV_SIZE)..ct.len()]);
+    let pt = cipher
+        .decrypt(&gcm_iv.into(), payload)
+        .map_err(|e| PspError::CryptoError(e))?;
+    cleartext.copy_from_slice(&pt);
 
     Ok(())
 }
@@ -307,6 +367,10 @@ pub fn psp_transport_encap(
     let in_ip = Ipv4Packet::new(in_eth.payload()).unwrap();
     let payload = in_ip.payload();
 
+    // TODO: Change the implementation to allocate and return the out_pkt. This
+    // will avoid the need for the calling function to know how big the output
+    // packet needs to be.
+
     let crypt_off = pkt_ctx.psp_cfg.transport_crypt_off * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off as usize > payload.len() {
         return Err(PspError::SkippedPacket("Crypt offset too big".to_string()));
@@ -320,29 +384,29 @@ pub fn psp_transport_encap(
     //   - Compute ICV and insert encrypted data
     //   - Insert ICV as the PSP trailer
 
-    let mut eth = MutableEthernetPacket::new(out_pkt).unwrap();
+    let mut eth = MutableEthernetPacket::new(out_pkt).ok_or(PspError::PacketBuildError)?;
     eth.clone_from(&in_eth);
 
-    let mut ip = MutableIpv4Packet::new(eth.payload_mut()).unwrap();
+    let mut ip = MutableIpv4Packet::new(eth.payload_mut()).ok_or(PspError::PacketBuildError)?;
     ip.clone_from(&in_ip);
     ip.set_total_length(ip.packet().len() as u16);
 
     // TODO: Replace unwrap() with proper handling
-    let mut udp = MutableUdpPacket::new(ip.payload_mut()).unwrap();
+    let mut udp = MutableUdpPacket::new(ip.payload_mut()).ok_or(PspError::PacketBuildError)?;
     udp.set_destination(PSP_UDP_PORT);
     // TODO: Replace with a simple hash of the inner transport header numbers
     udp.set_source(PSP_UDP_PORT);
     udp.set_checksum(0);
     udp.set_length(udp.packet().len() as u16);
 
-    let mut psp = MutablePspPacket::new(udp.payload_mut()).unwrap();
+    let mut psp = MutablePspPacket::new(udp.payload_mut()).ok_or(PspError::PacketBuildError)?;
     psp.set_spi(pkt_ctx.psp_cfg.spi);
     psp.set_crypt_offset(pkt_ctx.psp_cfg.transport_crypt_off);
     psp.set_hdr_ext_len(1);
     psp.set_vc(pkt_ctx.psp_cfg.include_vc as u8);
-    psp.set_iv(pkt_ctx.next_iv);
+    psp.set_iv(pkt_ctx.iv);
     psp.set_next_hdr(in_ip.get_next_level_protocol().0);
-    pkt_ctx.next_iv += 1;
+    pkt_ctx.iv += 1;
     match pkt_ctx.psp_cfg.crypto_alg {
         CryptoAlg::AesGcm128 => {
             psp.set_version(PspVersion::PspVer0 as u8);
@@ -362,21 +426,14 @@ pub fn psp_transport_encap(
         next_hdr: psp.get_next_hdr(),
         hdr_ext_len: psp.get_hdr_ext_len(),
         crypt_off: psp.get_crypt_offset(),
-        flags: flags,
+        flags,
         spi: psp.get_spi(),
         iv: psp.get_iv(),
     };
+    let aad = bincode::serialize(psp_hdr)?;
     let cleartext = in_ip.payload();
     let ciphertext = psp.payload_mut();
-    let mut icv: PspIcv = [0u8; PSP_ICV_SIZE];
-    psp_encrypt(
-        pkt_ctx,
-        psp_hdr,
-        cleartext,
-        &mut ciphertext[..cleartext.len()],
-        &mut icv,
-    )?;
-    ciphertext[cleartext.len()..].copy_from_slice(&icv);
+    psp_encrypt(pkt_ctx, &aad, cleartext, ciphertext)?;
 
     Ok(())
 }
@@ -476,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psp_encrypt() {
+    fn test_psp_encrypt() -> Result<(), Box<dyn std::error::Error>> {
         let mut pkt_ctx = PktContext::new();
         pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
         pkt_ctx.key = vec![
@@ -487,14 +544,16 @@ mod tests {
         psp_hdr.next_hdr = 6;
         psp_hdr.spi = 0x12345678;
         psp_hdr.iv = 0x12345678_9ABCDEFF;
+        let aad = bincode::serialize(&psp_hdr)?;
 
         let cleartext = vec![0u8; 256];
-        let mut ciphertext = vec![0u8; 256];
-        let mut icv = vec![0u8; PSP_ICV_SIZE];
+        let mut ciphertext = vec![0u8; 256 + PSP_ICV_SIZE];
 
-        let res = psp_encrypt(&pkt_ctx, &psp_hdr, &cleartext, &mut ciphertext, &mut icv);
+        let res = psp_encrypt(&pkt_ctx, &aad, &cleartext, &mut ciphertext);
         assert!(res.is_ok());
         assert_ne!(ciphertext, cleartext);
+
+        Ok(())
     }
 
     #[test]
@@ -511,7 +570,6 @@ mod tests {
             .payload(b"testing")?
             .build()?;
 
-        // TODO: Replace magic numbers.
         let out_pkt_len = in_pkt.len()
             + UdpPacket::minimum_packet_size()
             + PspPacket::minimum_packet_size()
@@ -531,6 +589,40 @@ mod tests {
         let psp = PspPacket::new(udp.payload()).unwrap();
         assert_eq!(psp.get_spi(), pkt_ctx.psp_cfg.spi);
         assert_eq!(psp.get_version(), PspVersion::PspVer0 as u8);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_psp_encrypt_decrypt() -> Result<(), Box<dyn std::error::Error>> {
+        let mut pkt_ctx = PktContext::new();
+        pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm128;
+        pkt_ctx.key = vec![
+            0x96, 0xc2, 0x2d, 0xc7, 0x99, 0x19, 0x80, 0x90, 0xb7, 0x4b, 0x70, 0xae, 0x46, 0x8e,
+            0x4e, 0x30,
+        ];
+        pkt_ctx.iv = 0x12345678_9ABCDEFF;
+        pkt_ctx.psp_cfg.spi = 0x12345678;
+
+        let mut psp_hdr = PspHeader::default();
+        psp_hdr.next_hdr = 6;
+        psp_hdr.spi = pkt_ctx.psp_cfg.spi;
+        psp_hdr.iv = pkt_ctx.iv;
+        let aad = bincode::serialize(&psp_hdr)?;
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let cleartext = vec![0u8; 256];
+        let mut ciphertext = vec![0u8; cleartext.len() + PSP_ICV_SIZE];
+
+        let rc = psp_encrypt(&pkt_ctx, &aad, &cleartext, &mut ciphertext);
+        assert!(rc.is_ok());
+        println!("{:?}", ciphertext);
+        let mut decrypted = vec![1u8; cleartext.len()];
+        let rc = psp_decrypt(&mut pkt_ctx, &aad, &ciphertext, &mut decrypted);
+        assert!(rc.is_ok());
+        assert_eq!(cleartext.len(), decrypted.len());
+        assert_eq!(cleartext, decrypted);
 
         Ok(())
     }

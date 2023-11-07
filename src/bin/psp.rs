@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Result;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use pcap_file::pcap::{PcapPacket, PcapReader, PcapWriter};
 use pnet::{packet::ethernet::EtherTypes, util::MacAddr};
@@ -21,7 +23,7 @@ use pnet_packet::{
 };
 use psp_security::{
     derive_psp_key, psp_transport_encap, CryptoAlg, PktContext, PspEncap, PspEncryptConfig,
-    PspMasterKey,
+    PspMasterKey, PSP_ICV_SIZE,
 };
 use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -360,7 +362,8 @@ fn read_pkts_from_pcap(pcap_file: &str) -> Result<Vec<PcapPacket<'_>>, Box<dyn E
 fn encrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Vec<u8> {
     match pkt_ctx.psp_cfg.psp_encap {
         PspEncap::Transport => {
-            let out_len = pkt_in.orig_len + 16 + 8;
+            // packet grows by UDP header (8), PSP header (16+) and ICV (16)
+            let out_len = pkt_in.orig_len + 16 + 8 + PSP_ICV_SIZE as u32;
             let mut pkt_out = vec![0u8; out_len as usize];
             psp_transport_encap(pkt_ctx, &pkt_in.data, &mut pkt_out).unwrap();
             pkt_out
@@ -390,7 +393,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = encrypt_cfg;
-    pkt_ctx.next_iv = 1;
+    pkt_ctx.iv = 1;
     derive_psp_key(&mut pkt_ctx).unwrap();
 
     for in_pkt in pkts {
@@ -402,23 +405,43 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
-    println!("{args:?}");
-    todo!()
+    let cfg = read_cfg_file(&args.cfg_file)?;
+    let pkts = read_pkts_from_pcap(&args.input)?;
+
+    let file_out = File::create(&args.output)?;
+    let mut pcap_writer = PcapWriter::new(file_out)?;
+
+    // TODO: Refactor PspEncryptConfig and PspConfig
+    let encrypt_cfg = PspEncryptConfig {
+        master_keys: cfg.master_keys,
+        spi: cfg.spi,
+        psp_encap: cfg.mode,
+        crypto_alg: cfg.algo,
+        transport_crypt_off: u8::try_from(cfg.crypto_offset).unwrap(),
+        include_vc: cfg.include_vc,
+    };
+
+    let mut pkt_ctx = PktContext::new();
+    pkt_ctx.psp_cfg = encrypt_cfg;
+    pkt_ctx.iv = 1;
+    derive_psp_key(&mut pkt_ctx).unwrap();
+
+    for in_pkt in pkts {
+        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt);
+        let out_pcap_pkt = PcapPacket::new(Duration::new(0, 0), out_pkt.len() as u32, &out_pkt);
+        pcap_writer.write_packet(&out_pcap_pkt)?;
+    }
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<()> {
     let err = match PspCliCommands::parse() {
-        PspCliCommands::Create(args) => {
-            create_command(&args)
-        }
-        PspCliCommands::Encrypt(args) => {
-            encrypt_pcap_file(&args)
-        }
-        PspCliCommands::Decrypt(args) => {
-            decrypt_pcap_file(&args)
-        }
+        PspCliCommands::Create(args) => create_command(&args),
+        PspCliCommands::Encrypt(args) => encrypt_pcap_file(&args),
+        PspCliCommands::Decrypt(args) => decrypt_pcap_file(&args),
     };
     if let Err(err) = err {
         eprintln!("Error: {err}")
     }
+    Ok(())
 }
