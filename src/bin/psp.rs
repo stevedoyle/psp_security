@@ -23,7 +23,7 @@ use pnet_packet::{
 };
 use psp_security::{
     derive_psp_key, psp_transport_encap, CryptoAlg, PktContext, PspEncap, PspEncryptConfig,
-    PspMasterKey, PSP_ICV_SIZE,
+    PspError, PspMasterKey,
 };
 use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -359,15 +359,9 @@ fn read_pkts_from_pcap(pcap_file: &str) -> Result<Vec<PcapPacket<'_>>, Box<dyn E
     Ok(pkts)
 }
 
-fn encrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Vec<u8> {
+fn encrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Result<Vec<u8>, PspError> {
     match pkt_ctx.psp_cfg.psp_encap {
-        PspEncap::Transport => {
-            // packet grows by UDP header (8), PSP header (16+) and ICV (16)
-            let out_len = pkt_in.orig_len + 16 + 8 + PSP_ICV_SIZE as u32;
-            let mut pkt_out = vec![0u8; out_len as usize];
-            psp_transport_encap(pkt_ctx, &pkt_in.data, &mut pkt_out).unwrap();
-            pkt_out
-        }
+        PspEncap::Transport => psp_transport_encap(pkt_ctx, &pkt_in.data),
         PspEncap::Tunnel => {
             todo!()
         }
@@ -397,7 +391,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     derive_psp_key(&mut pkt_ctx).unwrap();
 
     for in_pkt in pkts {
-        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt);
+        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
         let out_pcap_pkt = PcapPacket::new(Duration::new(0, 0), out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;
     }
@@ -427,7 +421,7 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     derive_psp_key(&mut pkt_ctx).unwrap();
 
     for in_pkt in pkts {
-        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt);
+        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
         let out_pcap_pkt = PcapPacket::new(Duration::new(0, 0), out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;
     }

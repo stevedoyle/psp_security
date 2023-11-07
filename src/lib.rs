@@ -5,14 +5,14 @@ use derive_builder::Builder;
 use pnet_packet::{
     ethernet::{EthernetPacket, MutableEthernetPacket},
     ipv4::{Ipv4Packet, MutableIpv4Packet},
-    udp::MutableUdpPacket,
+    udp::{MutableUdpPacket, UdpPacket},
     MutablePacket, Packet,
 };
 
 use serde::{Deserialize, Serialize};
 
 mod packet;
-use packet::psp::MutablePspPacket;
+use packet::psp::{MutablePspPacket, PspPacket};
 
 pub const PSP_ICV_SIZE: usize = 16;
 const PSP_MASTER_KEY_SIZE: usize = 32;
@@ -330,18 +330,10 @@ pub fn psp_decrypt(
 ///     | Eth Hdr | IP Hdr ] UDP Hdr | PSP Hdr | Payload | PSP Trailer |
 ///     +---------+--------+---------+---------+---------+-------------+
 ///
-pub fn psp_transport_encap(
-    pkt_ctx: &mut PktContext,
-    in_pkt: &[u8],
-    out_pkt: &mut [u8],
-) -> Result<(), PspError> {
+pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u8>, PspError> {
     let in_eth = EthernetPacket::new(in_pkt).unwrap();
     let in_ip = Ipv4Packet::new(in_eth.payload()).unwrap();
     let payload = in_ip.payload();
-
-    // TODO: Change the implementation to allocate and return the out_pkt. This
-    // will avoid the need for the calling function to know how big the output
-    // packet needs to be.
 
     let crypt_off = pkt_ctx.psp_cfg.transport_crypt_off * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off as usize > payload.len() {
@@ -358,14 +350,20 @@ pub fn psp_transport_encap(
     //   - Compute ICV and insert encrypted data
     //   - Insert ICV as the PSP trailer
 
-    let mut eth = MutableEthernetPacket::new(out_pkt).ok_or(PspError::PacketBuildError)?;
+    // TODO: Cater for PSP packet headers with non-minimum VC data.
+    let out_pkt_len = in_pkt.len()
+        + UdpPacket::minimum_packet_size()
+        + PspPacket::minimum_packet_size()
+        + PSP_ICV_SIZE;
+    let mut out_pkt = vec![0u8; out_pkt_len];
+
+    let mut eth = MutableEthernetPacket::new(&mut out_pkt).ok_or(PspError::PacketBuildError)?;
     eth.clone_from(&in_eth);
 
     let mut ip = MutableIpv4Packet::new(eth.payload_mut()).ok_or(PspError::PacketBuildError)?;
     ip.clone_from(&in_ip);
     ip.set_total_length(ip.packet().len() as u16);
 
-    // TODO: Replace unwrap() with proper handling
     let mut udp = MutableUdpPacket::new(ip.payload_mut()).ok_or(PspError::PacketBuildError)?;
     udp.set_destination(PSP_UDP_PORT);
     // TODO: Replace with a simple hash of the inner transport header numbers
@@ -409,7 +407,7 @@ pub fn psp_transport_encap(
     let ciphertext = psp.payload_mut();
     psp_encrypt(pkt_ctx, &aad, cleartext, ciphertext)?;
 
-    Ok(())
+    Ok(out_pkt)
 }
 
 #[cfg(test)]
@@ -548,11 +546,13 @@ mod tests {
             + UdpPacket::minimum_packet_size()
             + PspPacket::minimum_packet_size()
             + PSP_ICV_SIZE;
-        let mut out_pkt = vec![0u8; out_pkt_len];
         let mut pkt_ctx = PktContext::default();
         pkt_ctx.psp_cfg.spi = 1;
 
-        assert!(psp_transport_encap(&mut pkt_ctx, &in_pkt, &mut out_pkt).is_ok());
+        let rc = psp_transport_encap(&mut pkt_ctx, &in_pkt);
+        assert!(rc.is_ok());
+        let out_pkt = rc.unwrap();
+        assert_eq!(out_pkt_len, out_pkt.len());
 
         let eth = EthernetPacket::new(&out_pkt).unwrap();
         assert_eq!(eth.get_ethertype(), EtherTypes::Ipv4);
