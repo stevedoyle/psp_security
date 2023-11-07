@@ -1,5 +1,3 @@
-use std::fmt;
-
 use aes::Aes256;
 use bitfield::bitfield;
 use clap::ValueEnum;
@@ -149,65 +147,40 @@ impl Default for PktContext {
     }
 }
 
-//#[derive(thiserror::Error, Debug)]
-// enum PspError {
-//     #[error("Crypto Error: {0}")]
-//     Crypto(aes_gcm::Error),
-//     #[error{"Serialization Error: {0}"}]
-//     Serialize(#[from] bincode::ErrorKind)
-// }
-
-#[derive(Debug)]
+/// PspError enumerates all possible errors returned by this library.
+#[derive(thiserror::Error, Debug)]
 pub enum PspError {
+    /// Represents a crypto error. Crypto errors can occur during PSP packet
+    /// encryption or decryption.
+    #[error("PSP Crypto Error")]
     CryptoError(aes_gcm::Error),
-    Serialize(String),
+
+    /// Serialization errors occur when converting PSP headers into a byte
+    /// stream.
+    #[error("PSP Serialize Error")]
+    SerializeError(#[from] bincode::Error),
+
     //    BadPacket(packet::Error),
+    /// The packet was skipped. TODO: Improve this comment.
+    #[error("PSP Serialize Error")]
     SkippedPacket(String),
+
+    /// The PSP packet didn't contain any ciphertext payload.
+    #[error("PSP No Ciphertext In PSP Packet")]
     NoCiphertext,
+
+    /// An error was encountered building the packet.
+    #[error("PSP Packet Build Error")]
     PacketBuildError,
 }
 
-impl std::error::Error for PspError {}
-
+// This is required as aes_gcm::Error doesn't implement the necessary traits for
+// it to be used with thiserror #[from]
 impl From<aes_gcm::Error> for PspError {
     fn from(other: aes_gcm::Error) -> Self {
         Self::CryptoError(other)
     }
 }
-
-impl From<bincode::Error> for PspError {
-    fn from(other: bincode::Error) -> Self {
-        Self::Serialize(other.to_string())
-    }
-}
-
-impl fmt::Display for PspError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            PspError::CryptoError(e) => {
-                write!(f, "PSP Crypto Error {e}")
-            }
-            PspError::Serialize(e) => {
-                write!(f, "PSP Serialize Error {e}")
-            }
-            PspError::SkippedPacket(e) => {
-                write!(f, "PSP SkippedPacket Error {e}")
-            }
-            PspError::NoCiphertext => {
-                write!(f, "PSP No Ciphertext Error")
-            }
-            PspError::PacketBuildError => {
-                write!(f, "PSP Packet Build Error")
-            }
-        }
-    }
-}
-
-//impl From<packet::Error> for PspError {
-//    fn from(other: packet::Error) -> Self {
-//        Self::BadPacket(other)
-//    }
-//}
 
 const fn get_psp_version(spi: u32) -> PspVersion {
     match (spi >> PSP_SPI_KEY_SELECTOR_BIT) & 0x01 {
@@ -298,10 +271,10 @@ pub fn psp_encrypt(
     let ct = match get_psp_version(spi) {
         PspVersion::PspVer0 => Aes128Gcm::new(pkt_ctx.key[..16].into())
             .encrypt(&gcm_iv.into(), payload)
-            .map_err(|e| PspError::CryptoError(e))?,
+            .map_err(PspError::CryptoError)?,
         PspVersion::PspVer1 => Aes256Gcm::new(pkt_ctx.key[..].into())
             .encrypt(&gcm_iv.into(), payload)
-            .map_err(|e| PspError::CryptoError(e))?,
+            .map_err(PspError::CryptoError)?,
     };
 
     ciphertext.copy_from_slice(&ct);
@@ -341,7 +314,7 @@ pub fn psp_decrypt(
     };
     let pt = cipher
         .decrypt(&gcm_iv.into(), payload)
-        .map_err(|e| PspError::CryptoError(e))?;
+        .map_err(PspError::CryptoError)?;
     cleartext.copy_from_slice(&pt);
 
     Ok(())
