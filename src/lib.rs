@@ -157,13 +157,12 @@ pub enum PspError {
 
     /// Serialization errors occur when converting PSP headers into a byte
     /// stream.
-    #[error("PSP Serialize Error")]
+    #[error("PSP Serialization Error")]
     SerializeError(#[from] bincode::Error),
 
-    //    BadPacket(packet::Error),
-    /// The packet was skipped. TODO: Improve this comment.
-    #[error("PSP Serialize Error")]
-    SkippedPacket(String),
+    /// The packet could not be encapsulated in PSP.
+    #[error("Packet Could not be encapsulated in PSP")]
+    PacketEncapError(String),
 
     /// The PSP packet didn't contain any ciphertext payload.
     #[error("PSP No Ciphertext In PSP Packet")]
@@ -346,7 +345,9 @@ pub fn psp_transport_encap(
 
     let crypt_off = pkt_ctx.psp_cfg.transport_crypt_off * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off as usize > payload.len() {
-        return Err(PspError::SkippedPacket("Crypt offset too big".to_string()));
+        return Err(PspError::PacketEncapError(
+            "Crypt offset too big".to_string(),
+        ));
     }
 
     // Build the PSP encapsulated packet
