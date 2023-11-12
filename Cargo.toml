@@ -14,7 +14,6 @@ clap = { version = "4.4.7", features = ["derive"] }
 cmac = "0.7.2"
 crypto-common = "0.1.6"
 derive_builder = "0.12.0"
-packet = "0.1.4"
 pcap-file = "2.0.0"
 pnet = "0.34.0"
 pnet_packet = "0.34.0"
@@ -28,7 +27,4 @@ anyhow = "1.0.75"
 etherparse = "0.13.0"
 log = "0.4.20"
 test-log = "0.2.13"
-env_logger = "0.10.1"
-
-[dev-dependencies]
 env_logger = "0.10.1"
