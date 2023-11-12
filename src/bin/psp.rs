@@ -438,6 +438,8 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let err = match PspCliCommands::parse() {
         PspCliCommands::Create(args) => create_command(&args),
         PspCliCommands::Encrypt(args) => encrypt_pcap_file(&args),
