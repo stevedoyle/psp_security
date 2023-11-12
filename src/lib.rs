@@ -207,6 +207,11 @@ pub enum PspError {
     /// Invalid PSP Version
     #[error("Invalid PSP Version: {}", .0)]
     InvalidPspVersion(u8),
+
+    /// Invalid PSP packet size. This can occur when parsing the packet if the length after the PSP
+    /// header is too short to hold the PSP ICV value.
+    #[error("Invalid PSP Packet Size")]
+    InvalidPspPacketSize,
 }
 
 // This is required as aes_gcm::Error doesn't implement the necessary traits for
@@ -285,8 +290,10 @@ pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
     Ok(())
 }
 
+/// Use the PSP packet SPI and IV fields, build an IV for use with AES-GCM.
 fn get_aesgcm_iv(spi: u32, iv: u64) -> [u8; 12] {
     let mut gcm_iv: [u8; 12] = [0; 12];
+    // TODO: Is this the correct byte order?
     gcm_iv[0..4].copy_from_slice(&spi.to_ne_bytes());
     gcm_iv[4..12].copy_from_slice(&iv.to_ne_bytes());
     gcm_iv
@@ -419,8 +426,9 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     //   - Insert ICV as the PSP trailer
 
     // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let out_pkt_len =
-        in_pkt.len() + UdpHeader::SERIALIZED_SIZE + PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let psp_udp_encap_len = psp_encap_len + UdpHeader::SERIALIZED_SIZE;
+    let out_pkt_len = in_pkt.len() + psp_udp_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
 
     in_eth.write(&mut out_pkt)?;
@@ -428,19 +436,14 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let mut out_ip = in_ip;
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
-        .set_payload_len(
-            in_ip_payload.len()
-                + UdpHeader::SERIALIZED_SIZE
-                + PspPacket::minimum_packet_size()
-                + PSP_ICV_SIZE,
-        )
+        .set_payload_len(in_ip_payload.len() + psp_udp_encap_len)
         .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
         PSP_UDP_PORT,
         PSP_UDP_PORT,
-        in_ip_payload.len() + PspPacket::minimum_packet_size() + PSP_ICV_SIZE,
+        in_ip_payload.len() + psp_encap_len,
     )
     .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
 
@@ -535,19 +538,18 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     // Build the PSP encapsulated packet
     //   - copy the Ethernet and IP headers of the input packet.
-    //   - insert the op header based on ip header of input packet.
+    //   - insert the outer ip header based on ip header of input packet.
     //   - insert the PSP UDP header
     //   - insert the PSP header
-    //   - Copy crypt_off bytes from input packet starting at the L4 header
+    //   - Copy crypt_off bytes from input packet starting at the IP header
     //   - Compute ICV and insert encrypted data
     //   - Insert ICV as the PSP trailer
 
     // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let out_pkt_len = in_pkt.len()
-        + tun_hdr_size
-        + UdpHeader::SERIALIZED_SIZE
-        + PspPacket::minimum_packet_size()
-        + PSP_ICV_SIZE;
+    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let psp_udp_encap_len = psp_encap_len + UdpHeader::SERIALIZED_SIZE;
+    let psp_udp_ip_encap_len = psp_udp_encap_len + tun_hdr_size;
+    let out_pkt_len = in_pkt.len() + psp_udp_ip_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
 
     in_eth.write(&mut out_pkt)?;
@@ -555,19 +557,14 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let mut out_ip = in_ip;
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
-        .set_payload_len(
-            psp_payload_len
-                + UdpHeader::SERIALIZED_SIZE
-                + PspPacket::minimum_packet_size()
-                + PSP_ICV_SIZE,
-        )
+        .set_payload_len(psp_payload_len + psp_udp_encap_len)
         .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
         PSP_UDP_PORT,
         PSP_UDP_PORT,
-        psp_payload_len + PspPacket::minimum_packet_size() + PSP_ICV_SIZE,
+        psp_payload_len + psp_encap_len,
     )
     .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
 
@@ -638,9 +635,13 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     let psp_buf = parsed_pkt.payload;
 
-    // TODO: Improve error handling. Replace unwrap() with PspError.
-    let in_psp = PspPacket::new(psp_buf).unwrap();
+    let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
+        "Error parsing PSP header".to_string(),
+    ))?;
     let payload = in_psp.payload();
+    if payload.len() < PSP_ICV_SIZE {
+        return Err(PspError::InvalidPspPacketSize);
+    }
 
     let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off > payload.len() {
@@ -656,9 +657,9 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     //   - Copy crypt_off bytes from input packet starting at the L4 header
 
     // TODO: Cater for PSP packet headers with non-minimum VC data.
-    // TODO: Check that in_pkt.len() is long enough.
-    let out_pkt_len =
-        in_pkt.len() - UdpHeader::SERIALIZED_SIZE - PspPacket::minimum_packet_size() - PSP_ICV_SIZE;
+    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let psp_and_udp_encap_len = UdpHeader::SERIALIZED_SIZE + psp_encap_len;
+    let out_pkt_len = in_pkt.len() - psp_and_udp_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
 
     if let Some(eth) = parsed_pkt.link {
@@ -666,7 +667,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     }
     if let Some(ip) = parsed_pkt.ip {
         let mut out_ip = ip;
-        let out_ip_len = parsed_pkt.payload.len() - PspPacket::minimum_packet_size() - PSP_ICV_SIZE;
+        let out_ip_len = parsed_pkt.payload.len() - psp_encap_len;
         out_ip
             .set_payload_len(out_ip_len)
             .map_err(|err| PspError::PacketDecapError(format!("{err}")))?;
@@ -764,6 +765,9 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     // TODO: Improve error handling. Replace unwrap() with PspError.
     let in_psp = PspPacket::new(psp_buf).unwrap();
     let payload = in_psp.payload();
+    if payload.len() < PSP_ICV_SIZE {
+        return Err(PspError::InvalidPspPacketSize);
+    }
 
     let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off > payload.len() {
@@ -783,11 +787,10 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     // TODO: Cater for PSP packet headers with non-minimum VC data.
     // TODO: Check that in_pkt.len() is long enough.
-    let out_pkt_len = in_pkt.len()
-        - ip_hdr_size
-        - UdpHeader::SERIALIZED_SIZE
-        - PspPacket::minimum_packet_size()
-        - PSP_ICV_SIZE;
+    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let psp_udp_encap_len = UdpHeader::SERIALIZED_SIZE + psp_encap_len;
+    let psp_udp_ip_encap_len = ip_hdr_size + psp_udp_encap_len;
+    let out_pkt_len = in_pkt.len() - psp_udp_ip_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
 
     eth.write(&mut out_pkt)?;
