@@ -294,8 +294,8 @@ pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
 fn get_aesgcm_iv(spi: u32, iv: u64) -> [u8; 12] {
     let mut gcm_iv: [u8; 12] = [0; 12];
     // TODO: Is this the correct byte order?
-    gcm_iv[0..4].copy_from_slice(&spi.to_ne_bytes());
-    gcm_iv[4..12].copy_from_slice(&iv.to_ne_bytes());
+    gcm_iv[0..4].copy_from_slice(&spi.to_be_bytes());
+    gcm_iv[4..12].copy_from_slice(&iv.to_be_bytes());
     gcm_iv
 }
 
@@ -463,13 +463,12 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         iv: pkt_ctx.iv,
     };
 
+    let start_of_psp_hdr = out_pkt.len();
     let psp_buf = bincode::DefaultOptions::new()
         .with_big_endian()
         .with_fixint_encoding()
         .serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
-
-    let aad = psp_buf;
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
@@ -478,6 +477,8 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let cleartext = &in_ip_payload[crypt_off..];
 
     let start_of_crypto_region = out_pkt.len();
+    let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
+
     out_pkt.resize(out_pkt_len, 0);
     let ciphertext = &mut out_pkt[start_of_crypto_region..];
 
@@ -585,13 +586,13 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
         iv: pkt_ctx.iv,
     };
 
+    let start_of_psp_hdr = out_pkt.len();
+
     let psp_buf = bincode::DefaultOptions::new()
         .with_big_endian()
         .with_fixint_encoding()
         .serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
-
-    let aad = psp_buf;
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
@@ -600,6 +601,8 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let cleartext = &psp_payload[crypt_off..];
 
     let start_of_crypto_region = out_pkt.len();
+    let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
+
     out_pkt.resize(out_pkt_len, 0);
     let ciphertext = &mut out_pkt[start_of_crypto_region..];
 
@@ -696,10 +699,12 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         iv: in_psp.get_iv(),
     };
 
-    let aad = bincode::DefaultOptions::new()
+    // TODO: Fix this
+    let mut aad = bincode::DefaultOptions::new()
         .with_big_endian()
         .with_fixint_encoding()
         .serialize(&psp_hdr)?;
+    aad.extend_from_slice(&in_psp.payload()[..crypt_off]);
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
 
@@ -816,10 +821,11 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
         iv: in_psp.get_iv(),
     };
 
-    let aad = bincode::DefaultOptions::new()
+    let mut aad = bincode::DefaultOptions::new()
         .with_big_endian()
         .with_fixint_encoding()
         .serialize(&psp_hdr)?;
+    aad.extend_from_slice(&in_psp.payload()[..crypt_off]);
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
 
