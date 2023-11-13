@@ -61,21 +61,21 @@ bitfield! {
     #[derive(Copy, Clone, Serialize, PartialEq, Eq)]
     pub struct PspHeaderFlags(u8);
     impl Debug;
-    s, set_s: 0;
-    d, set_d: 1;
+    r, set_r: 0;
+    vc, set_vc: 1;
     version, set_version: 5, 2;
-    vc, set_vc: 6;
-    r, set_r: 7;
+    d, set_d: 6;
+    s, set_s: 7;
 }
 
 impl Default for PspHeaderFlags {
     fn default() -> Self {
         let mut flags = Self(0);
-        flags.set_s(false);
-        flags.set_d(false);
-        flags.set_version(PspVersion::PspVer0 as u8);
-        flags.set_vc(false);
         flags.set_r(true);
+        flags.set_vc(false);
+        flags.set_version(PspVersion::PspVer0 as u8);
+        flags.set_d(false);
+        flags.set_s(false);
         flags
     }
 }
@@ -315,10 +315,10 @@ pub fn psp_encrypt(
         Aes128Gcm,
     };
 
-    debug!("psp_encrypt(): Key: {:?}", key);
-    debug!("psp_encrypt(): IV:  {:?}", iv);
-    debug!("psp_encrypt(): AAD: {:?}", aad);
-    debug!("psp_encrypt(): Plaintext: {:?}", cleartext);
+    debug!("psp_encrypt(): Key: {:02X?}", key);
+    debug!("psp_encrypt(): IV:  {:02X?}", iv);
+    debug!("psp_encrypt(): AAD: {:02X?}", aad);
+    debug!("psp_encrypt(): Plaintext: {:02X?}", cleartext);
 
     let payload = Payload {
         msg: cleartext,
@@ -336,7 +336,7 @@ pub fn psp_encrypt(
 
     ciphertext.copy_from_slice(&ct);
 
-    debug!("psp_encrypt(): Ciphertext: {:?}", ciphertext);
+    debug!("psp_encrypt(): Ciphertext: {:02X?}", ciphertext);
 
     Ok(())
 }
@@ -360,10 +360,10 @@ pub fn psp_decrypt(
         return Err(PspError::NoCiphertext);
     }
 
-    debug!("psp_decrypt(): Key: {:?}", key);
-    debug!("psp_decrypt(): IV:  {:?}", iv);
-    debug!("psp_decrypt(): AAD: {:?}", aad);
-    debug!("psp_decrypt(): Ciphertext: {:?}", ciphertext);
+    debug!("psp_decrypt(): Key: {:02X?}", key);
+    debug!("psp_decrypt(): IV:  {:02X?}", iv);
+    debug!("psp_decrypt(): AAD: {:02X?}", aad);
+    debug!("psp_decrypt(): Ciphertext: {:02X?}", ciphertext);
 
     let payload = Payload {
         msg: ciphertext,
@@ -379,7 +379,7 @@ pub fn psp_decrypt(
     };
     cleartext.copy_from_slice(&pt);
 
-    debug!("psp_decrypt(): Plaintext: {:?}", cleartext);
+    debug!("psp_decrypt(): Plaintext: {:02X?}", cleartext);
 
     Ok(())
 }
@@ -411,6 +411,7 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let (in_ip, next_protocol, in_ip_payload) = IpHeader::from_slice(in_eth_payload)?;
 
     let crypt_off = usize::from(pkt_ctx.psp_cfg.transport_crypt_off) * PSP_CRYPT_OFFSET_UNITS;
+    debug!("transport_decap: crypt_off: {crypt_off}");
     if crypt_off > in_ip_payload.len() {
         return Err(PspError::PacketEncapError(
             "Crypt offset too big".to_string(),
@@ -644,6 +645,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     }
 
     let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    debug!("transport_decap: crypt_off: {crypt_off}");
     if crypt_off > payload.len() {
         return Err(PspError::PacketDecapError(
             "Invalid crypto offset".to_string(),
@@ -867,7 +869,7 @@ mod tests {
         assert_eq!(hdr.spi, 0x12345678);
         assert_eq!(hdr.iv, 0x12345678_9ABCDEF0);
         assert_eq!(hdr.next_hdr, 17);
-        assert_eq!(hdr.flags.0, 0x80u8);
+        assert_eq!(hdr.flags.0, 0x01u8);
     }
 
     #[test]
@@ -1175,6 +1177,22 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_pspv0_transport_encap_decap_crypt_off() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        pkt_ctx.psp_cfg.transport_crypt_off = 1;
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv4_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_transport_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_transport_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
     fn test_pspv1_transport_encap_decap_ipv4() -> Result<(), PspError> {
         let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer1);
         let mut decap_pkt_ctx = pkt_ctx.clone();
@@ -1222,6 +1240,22 @@ mod tests {
     #[test_log::test]
     fn test_pspv0_tunnel_encap_decap_ipv4() -> Result<(), PspError> {
         let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv4_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_tunnel_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_pspv0_tunnel_encap_decap_crypt_off() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        pkt_ctx.psp_cfg.transport_crypt_off = 2;
         let mut decap_pkt_ctx = pkt_ctx.clone();
         let orig_pkt = get_ipv4_test_pkt();
 
