@@ -642,6 +642,8 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
         "Error parsing PSP header".to_string(),
     ))?;
+    let psp_hdr_len = in_psp.get_hdr_ext_len() * 8 + 8;
+
     let payload = in_psp.payload();
     if payload.len() < PSP_ICV_SIZE {
         return Err(PspError::InvalidPspPacketSize);
@@ -682,29 +684,8 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
-    // TODO: Need to find a better way for getting the encoding of the PSP header without building a
-    // PspHeader struct and serializing it.
-    let mut flags = PspHeaderFlags::default();
-    flags.set_version(in_psp.get_version());
-    flags.set_vc(in_psp.get_vc() == 1);
-    flags.set_d(in_psp.get_d() == 1);
-    flags.set_s(in_psp.get_s() == 1);
-
-    let psp_hdr = PspHeader {
-        next_hdr: in_psp.get_next_hdr(),
-        hdr_ext_len: in_psp.get_hdr_ext_len(),
-        crypt_off: in_psp.get_crypt_offset(),
-        flags,
-        spi: in_psp.get_spi(),
-        iv: in_psp.get_iv(),
-    };
-
-    // TODO: Fix this
-    let mut aad = bincode::DefaultOptions::new()
-        .with_big_endian()
-        .with_fixint_encoding()
-        .serialize(&psp_hdr)?;
-    aad.extend_from_slice(&in_psp.payload()[..crypt_off]);
+    let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
+    let aad = parsed_pkt.payload[..aad_len].to_vec();
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
 
@@ -771,6 +752,8 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     // TODO: Improve error handling. Replace unwrap() with PspError.
     let in_psp = PspPacket::new(psp_buf).unwrap();
+    let psp_hdr_len = in_psp.get_hdr_ext_len() * 8 + 8;
+
     let payload = in_psp.payload();
     if payload.len() < PSP_ICV_SIZE {
         return Err(PspError::InvalidPspPacketSize);
@@ -804,28 +787,8 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
-    // TODO: Need to find a better way for getting the encoding of the PSP header without building a
-    // PspHeader struct and serializing it.
-    let mut flags = PspHeaderFlags::default();
-    flags.set_version(in_psp.get_version());
-    flags.set_vc(in_psp.get_vc() == 1);
-    flags.set_d(in_psp.get_d() == 1);
-    flags.set_s(in_psp.get_s() == 1);
-
-    let psp_hdr = PspHeader {
-        next_hdr: in_psp.get_next_hdr(),
-        hdr_ext_len: in_psp.get_hdr_ext_len(),
-        crypt_off: in_psp.get_crypt_offset(),
-        flags,
-        spi: in_psp.get_spi(),
-        iv: in_psp.get_iv(),
-    };
-
-    let mut aad = bincode::DefaultOptions::new()
-        .with_big_endian()
-        .with_fixint_encoding()
-        .serialize(&psp_hdr)?;
-    aad.extend_from_slice(&in_psp.payload()[..crypt_off]);
+    let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
+    let aad = parsed_pkt.payload[..aad_len].to_vec();
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
 
