@@ -392,7 +392,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 
     for in_pkt in pkts {
         let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
-        let out_pcap_pkt = PcapPacket::new(Duration::new(0, 0), out_pkt.len() as u32, &out_pkt);
+        let out_pcap_pkt = PcapPacket::new(in_pkt.timestamp, out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;
     }
     Ok(())
@@ -431,7 +431,7 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
 
     for in_pkt in pkts {
         let out_pkt = decrypt_pkt(&mut pkt_ctx, &in_pkt)?;
-        let out_pcap_pkt = PcapPacket::new(Duration::new(0, 0), out_pkt.len() as u32, &out_pkt);
+        let out_pcap_pkt = PcapPacket::new(in_pkt.timestamp, out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;
     }
     Ok(())
