@@ -97,13 +97,6 @@ pub struct PspHeader {
     iv: u64,
 }
 
-//type PspIcv = [u8; PSP_ICV_SIZE];
-
-//#[derive(Debug)]
-//struct PspTrailer {
-//    icv: PspIcv,
-//}
-
 pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
 type PspDerivedKey = Vec<u8>;
@@ -148,20 +141,7 @@ impl PktContext {
 
 impl Default for PktContext {
     fn default() -> PktContext {
-        PktContext {
-            psp_cfg: PspEncryptConfig {
-                master_keys: [[0; 32], [0; 32]],
-                spi: 1,
-                psp_encap: PspEncap::Transport,
-                crypto_alg: CryptoAlg::AesGcm128,
-                transport_crypt_off: 0,
-                //                ipv4_tunnel_crypt_off: 0,
-                //                ipv6_tunnel_crypt_off: 0,
-                include_vc: false,
-            },
-            key: vec![0; 16],
-            iv: 1,
-        }
+        PktContext::new()
     }
 }
 
