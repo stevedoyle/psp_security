@@ -101,8 +101,8 @@ pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
 type PspDerivedKey = Vec<u8>;
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PspEncryptConfig {
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct PspConfig {
     pub master_keys: [PspMasterKey; 2],
     pub spi: u32,
     pub psp_encap: PspEncap,
@@ -115,7 +115,7 @@ pub struct PspEncryptConfig {
 
 #[derive(Debug, Clone)]
 pub struct PktContext {
-    pub psp_cfg: PspEncryptConfig,
+    pub psp_cfg: PspConfig,
     pub key: PspDerivedKey,
     pub iv: u64,
 }
@@ -123,7 +123,7 @@ pub struct PktContext {
 impl PktContext {
     pub fn new() -> PktContext {
         PktContext {
-            psp_cfg: PspEncryptConfig {
+            psp_cfg: PspConfig {
                 master_keys: [[0; 32], [0; 32]],
                 spi: 1,
                 psp_encap: PspEncap::Transport,

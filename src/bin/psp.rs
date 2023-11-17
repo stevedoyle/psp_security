@@ -22,11 +22,10 @@ use pnet_packet::{
     MutablePacket,
 };
 use psp_security::{
-    derive_psp_key, psp_transport_decap, psp_transport_encap, CryptoAlg, PktContext, PspEncap,
-    PspEncryptConfig, PspError, PspMasterKey,
+    derive_psp_key, psp_transport_decap, psp_transport_encap, CryptoAlg, PktContext, PspConfig,
+    PspEncap, PspError,
 };
 use rand::{thread_rng, RngCore};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum IPVersion {
@@ -34,15 +33,15 @@ enum IPVersion {
     Ipv6,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct PspConfig {
-    master_keys: [PspMasterKey; 2],
-    spi: u32,
-    mode: PspEncap,
-    algo: CryptoAlg,
-    crypto_offset: u32,
-    include_vc: bool,
-}
+// #[derive(Debug, Default, Serialize, Deserialize)]
+// struct PspConfig {
+//     master_keys: [PspMasterKey; 2],
+//     spi: u32,
+//     mode: PspEncap,
+//     algo: CryptoAlg,
+//     crypto_offset: u32,
+//     include_vc: bool,
+// }
 
 #[derive(Parser)]
 #[command(name = "psp")]
@@ -140,7 +139,7 @@ struct CreateConfigArgs {
     ///
     /// Non-negative integer with units of 4 bytes (e.g. 1)
     #[arg(long, default_value_t = 0)]
-    crypto_offset: u32,
+    crypto_offset: u8,
 
     /// Include virtual cookie
     #[arg(short, long, default_value_t = false)]
@@ -322,10 +321,10 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
     thread_rng().fill_bytes(&mut cfg.master_keys[0]);
     thread_rng().fill_bytes(&mut cfg.master_keys[1]);
     cfg.spi = args.spi;
-    cfg.crypto_offset = args.crypto_offset;
-    cfg.mode = args.mode;
+    cfg.transport_crypt_off = args.crypto_offset;
+    cfg.psp_encap = args.mode;
     cfg.include_vc = args.vc;
-    cfg.algo = args.alg;
+    cfg.crypto_alg = args.alg;
 
     std::fs::write(&args.cfg_file, serde_json::to_string_pretty(&cfg)?)?;
     println!("Created file: {}", args.cfg_file);
@@ -375,18 +374,8 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     let file_out = File::create(&args.output)?;
     let mut pcap_writer = PcapWriter::new(file_out)?;
 
-    // TODO: Refactor PspEncryptConfig and PspConfig
-    let encrypt_cfg = PspEncryptConfig {
-        master_keys: cfg.master_keys,
-        spi: cfg.spi,
-        psp_encap: cfg.mode,
-        crypto_alg: cfg.algo,
-        transport_crypt_off: u8::try_from(cfg.crypto_offset).unwrap(),
-        include_vc: cfg.include_vc,
-    };
-
     let mut pkt_ctx = PktContext::new();
-    pkt_ctx.psp_cfg = encrypt_cfg;
+    pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
     derive_psp_key(&mut pkt_ctx).unwrap();
 
@@ -414,18 +403,8 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     let file_out = File::create(&args.output)?;
     let mut pcap_writer = PcapWriter::new(file_out)?;
 
-    // TODO: Refactor PspEncryptConfig and PspConfig
-    let encrypt_cfg = PspEncryptConfig {
-        master_keys: cfg.master_keys,
-        spi: cfg.spi,
-        psp_encap: cfg.mode,
-        crypto_alg: cfg.algo,
-        transport_crypt_off: u8::try_from(cfg.crypto_offset).unwrap(),
-        include_vc: cfg.include_vc,
-    };
-
     let mut pkt_ctx = PktContext::new();
-    pkt_ctx.psp_cfg = encrypt_cfg;
+    pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
     derive_psp_key(&mut pkt_ctx).unwrap();
 
