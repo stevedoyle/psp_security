@@ -273,7 +273,6 @@ pub fn derive_psp_key(pkt_ctx: &mut PktContext) -> Result<(), PspError> {
 /// Use the PSP packet SPI and IV fields, build an IV for use with AES-GCM.
 fn get_aesgcm_iv(spi: u32, iv: u64) -> [u8; 12] {
     let mut gcm_iv: [u8; 12] = [0; 12];
-    // TODO: Is this the correct byte order?
     gcm_iv[0..4].copy_from_slice(&spi.to_be_bytes());
     gcm_iv[4..12].copy_from_slice(&iv.to_be_bytes());
     gcm_iv
@@ -729,9 +728,9 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     }?;
 
     let psp_buf = parsed_pkt.payload;
-
-    // TODO: Improve error handling. Replace unwrap() with PspError.
-    let in_psp = PspPacket::new(psp_buf).unwrap();
+    let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
+        "Error parsing PSP header".to_string(),
+    ))?;
     let psp_hdr_len = in_psp.get_hdr_ext_len() * 8 + 8;
 
     let payload = in_psp.payload();
@@ -756,7 +755,6 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     //     packet.
 
     // TODO: Cater for PSP packet headers with non-minimum VC data.
-    // TODO: Check that in_pkt.len() is long enough.
     let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
     let psp_udp_encap_len = UdpHeader::SERIALIZED_SIZE + psp_encap_len;
     let psp_udp_ip_encap_len = ip_hdr_size + psp_udp_encap_len;
