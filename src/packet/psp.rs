@@ -2,6 +2,25 @@ use pnet_macros::packet;
 use pnet_macros_support::types::*;
 
 /// Represents a PSP Packet.
+///
+/// PSP Security Payload (PSP) Header
+///
+/// |      0        |       1       |       2       |      3        |
+/// |0 1 2 3 4 5 6 7|8 9 0 1 2 3 4 5|6 7 8 9 0 1 2 3|4 5 6 7 8 9 0 1|
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |  Next Header  |  Hdr Ext Len  | R |Crypt Off  |S|D|Version|V|1|
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                Security Parameters Index (SPI)                |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                                                               |
+/// |                  Initialization Vector (IV)                   |
+/// |                                                               |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                                                               |
+/// |             Virtualization Cookie (VC) [Optional]             |
+/// |                                                               |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///
 #[packet]
 pub struct Psp {
     pub next_hdr: u8,
