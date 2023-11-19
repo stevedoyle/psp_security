@@ -108,8 +108,8 @@ pub struct PspConfig {
     pub psp_encap: PspEncap,
     pub crypto_alg: CryptoAlg,
     pub transport_crypt_off: u8,
-    //    ipv4_tunnel_crypt_off: u8,
-    //    ipv6_tunnel_crypt_off: u8,
+    pub ipv4_tunnel_crypt_off: u8,
+    pub ipv6_tunnel_crypt_off: u8,
     pub include_vc: bool,
 }
 
@@ -129,8 +129,8 @@ impl PktContext {
                 psp_encap: PspEncap::Transport,
                 crypto_alg: CryptoAlg::AesGcm128,
                 transport_crypt_off: 0,
-                //                ipv4_tunnel_crypt_off: 0,
-                //                ipv6_tunnel_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
                 include_vc: false,
             },
             key: vec![0; 16],
@@ -510,7 +510,12 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     let (in_ip, _, _) = IpHeader::from_slice(in_eth_payload)?;
 
-    let crypt_off = usize::from(pkt_ctx.psp_cfg.transport_crypt_off) * PSP_CRYPT_OFFSET_UNITS;
+    let crypt_off_hdr_val = match psp_next_protocol {
+        ip_number::IPV4 => usize::from(pkt_ctx.psp_cfg.ipv4_tunnel_crypt_off),
+        ip_number::IPV6 => usize::from(pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off),
+        _ => 0,
+    };
+    let crypt_off = crypt_off_hdr_val * PSP_CRYPT_OFFSET_UNITS;
     if crypt_off > in_eth_payload.len() {
         return Err(PspError::PacketEncapError(
             "Crypto offset too big".to_string(),
@@ -558,8 +563,7 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let psp_hdr = &PspHeader {
         next_hdr: psp_next_protocol,
         hdr_ext_len: 1,
-        // TODO: Expand config to have crypto offsets for tunnel mode also.
-        crypt_off: pkt_ctx.psp_cfg.transport_crypt_off,
+        crypt_off: crypt_off_hdr_val as u8,
         flags,
         spi: pkt_ctx.psp_cfg.spi,
         iv: pkt_ctx.iv,
@@ -1202,7 +1206,7 @@ mod tests {
     #[test_log::test]
     fn test_pspv0_tunnel_encap_decap_crypt_off() -> Result<(), PspError> {
         let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
-        pkt_ctx.psp_cfg.transport_crypt_off = 2;
+        pkt_ctx.psp_cfg.ipv4_tunnel_crypt_off = 2;
         let mut decap_pkt_ctx = pkt_ctx.clone();
         let orig_pkt = get_ipv4_test_pkt();
 

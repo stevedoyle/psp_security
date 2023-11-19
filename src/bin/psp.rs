@@ -322,6 +322,8 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
     thread_rng().fill_bytes(&mut cfg.master_keys[1]);
     cfg.spi = args.spi;
     cfg.transport_crypt_off = args.crypto_offset;
+    cfg.ipv4_tunnel_crypt_off = args.crypto_offset;
+    cfg.ipv6_tunnel_crypt_off = args.crypto_offset;
     cfg.psp_encap = args.mode;
     cfg.include_vc = args.vc;
     cfg.crypto_alg = args.alg;
