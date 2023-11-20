@@ -1,4 +1,4 @@
-use std::io;
+use std::{fmt, io, str::FromStr};
 
 use aes::Aes256;
 use aes_gcm::Aes256Gcm;
@@ -50,11 +50,53 @@ pub enum PspEncap {
     Tunnel,
 }
 
+impl fmt::Display for PspEncap {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Transport => write!(f, "transport"),
+            Self::Tunnel => write!(f, "tunnel"),
+        }
+    }
+}
+
+impl FromStr for PspEncap {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<PspEncap, Self::Err> {
+        match s {
+            "transport" => Ok(PspEncap::Transport),
+            "tunnel" => Ok(PspEncap::Tunnel),
+            _ => Err("Invalid PspEncap string".to_string()),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Default, Serialize, Deserialize, ValueEnum)]
 pub enum CryptoAlg {
     AesGcm128,
     #[default]
     AesGcm256,
+}
+
+impl fmt::Display for CryptoAlg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::AesGcm128 => write!(f, "aes-gcm-128"),
+            Self::AesGcm256 => write!(f, "aes-gcm-256"),
+        }
+    }
+}
+
+impl FromStr for CryptoAlg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<CryptoAlg, Self::Err> {
+        match s {
+            "aes-gcm-128" => Ok(CryptoAlg::AesGcm128),
+            "aes-gcm-256" => Ok(CryptoAlg::AesGcm256),
+            _ => Err("Invalid crypto algorithm string".to_string()),
+        }
+    }
 }
 
 bitfield! {

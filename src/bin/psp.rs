@@ -1,16 +1,19 @@
 use std::{
     cmp::min,
     error::Error,
+    ffi::OsStr,
     fs::File,
-    io::BufReader,
+    io::{BufRead, BufReader},
     net::{Ipv4Addr, Ipv6Addr},
     num::Wrapping,
+    path::PathBuf,
     time::Duration,
 };
 
 use anyhow::Result;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use log::{debug, info};
 use pcap_file::pcap::{PcapPacket, PcapReader, PcapWriter};
 use pnet::{packet::ethernet::EtherTypes, util::MacAddr};
 use pnet_packet::{
@@ -23,7 +26,7 @@ use pnet_packet::{
 };
 use psp_security::{
     derive_psp_key, psp_transport_decap, psp_transport_encap, CryptoAlg, PktContext, PspConfig,
-    PspEncap, PspError,
+    PspEncap, PspError, PspMasterKey,
 };
 use rand::{thread_rng, RngCore};
 
@@ -148,6 +151,10 @@ struct CreateConfigArgs {
     /// Name of the output configuration file
     #[arg(short, long, default_value_t = String::from("psp_encrypt.cfg"))]
     cfg_file: String,
+
+    /// json file format
+    #[arg(short, long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -316,6 +323,21 @@ fn create_pcap_file(args: &CreatePcapArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn key_to_string(key: &[u8]) -> String {
+    key.into_iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn vc_to_string(vc: bool) -> String {
+    match vc {
+        true => "vc",
+        false => "no-vc",
+    }
+    .to_string()
+}
+
 fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
     let mut cfg = PspConfig::default();
     thread_rng().fill_bytes(&mut cfg.master_keys[0]);
@@ -328,16 +350,112 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
     cfg.include_vc = args.vc;
     cfg.crypto_alg = args.alg;
 
-    std::fs::write(&args.cfg_file, serde_json::to_string_pretty(&cfg)?)?;
-    println!("Created file: {}", args.cfg_file);
+    if args.json {
+        let mut path = PathBuf::from(&args.cfg_file);
+        path.set_extension("json");
+        std::fs::write(&path, serde_json::to_string_pretty(&cfg)?)?;
+        println!("Created file: {}", path.display());
+    } else {
+        let mut cfg_parts: Vec<String> = Vec::with_capacity(10);
+        cfg_parts.push(key_to_string(&cfg.master_keys[0]));
+        cfg_parts.push(key_to_string(&cfg.master_keys[1]));
+        cfg_parts.push(format!("{:08X}", cfg.spi));
+        cfg_parts.push(format!("{}", cfg.psp_encap));
+        cfg_parts.push(format!("{}", cfg.crypto_alg));
+        cfg_parts.push(format!("{}", cfg.transport_crypt_off));
+        cfg_parts.push(format!("{}", cfg.ipv4_tunnel_crypt_off));
+        cfg_parts.push(format!("{}", cfg.ipv6_tunnel_crypt_off));
+        cfg_parts.push(format!("{}", vc_to_string(cfg.include_vc)));
+
+        let cfg_string: String = cfg_parts.join("\n");
+        info!("{cfg_string}");
+
+        std::fs::write(&args.cfg_file, cfg_string)?;
+        println!("Created file: {}", args.cfg_file);
+    }
     Ok(())
 }
 
 fn read_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
+    let path = PathBuf::from(cfg_file);
+    let jsonfile: bool = match path.extension().unwrap_or(OsStr::new("cfg")).to_str() {
+        Some("json") => true,
+        _ => false,
+    };
+
     let file_in = File::open(cfg_file)?;
-    let reader = BufReader::new(file_in);
-    let cfg = serde_json::from_reader(reader)?;
+    let mut reader = BufReader::new(file_in);
+    let cfg = match jsonfile {
+        true => serde_json::from_reader(reader)?,
+        false => parse_cfg_file(&mut reader)?,
+    };
     Ok(cfg)
+}
+
+fn parse_cfg_file(reader: &mut BufReader<File>) -> Result<PspConfig, Box<dyn Error>> {
+    let mut cfg = PspConfig::default();
+    let mut line = String::new();
+
+    reader.read_line(&mut line)?;
+    cfg.master_keys[0] = parse_key(line.trim())?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.master_keys[1] = parse_key(line.trim())?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.spi = parse_spi(&line.trim())?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.psp_encap = line.trim().parse()?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.crypto_alg = line.trim().parse()?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.transport_crypt_off = line.trim().parse()?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.ipv4_tunnel_crypt_off = line.trim().parse()?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.ipv6_tunnel_crypt_off = line.trim().parse()?;
+
+    line.clear();
+    reader.read_line(&mut line)?;
+    cfg.include_vc = parse_vc(&line.trim());
+
+    debug!("Parsed cfg: {:?}", cfg);
+
+    Ok(cfg)
+}
+
+fn parse_key(line: &str) -> Result<PspMasterKey, Box<dyn Error>> {
+    let keystr: String = line.split(' ').collect();
+    let keyv = hex::decode(keystr)?;
+    let key: PspMasterKey = keyv
+        .try_into()
+        .map_err(|_| "Invalid Master Key Length".to_string())?;
+    Ok(key)
+}
+
+fn parse_spi(spi_str: &str) -> Result<u32, Box<dyn Error>> {
+    let spi = u32::from_str_radix(spi_str, 16)?;
+
+    Ok(spi)
+}
+
+fn parse_vc(vc_str: &str) -> bool {
+    match vc_str {
+        "vc" => true,
+        _ => false,
+    }
 }
 
 fn create_command(args: &CreateArgs) -> Result<(), Box<dyn Error>> {
@@ -430,4 +548,28 @@ fn main() -> Result<()> {
         eprintln!("Error: {err}")
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key() {
+        let key = "32 F0 81 74 E5 3E 7B 7F 64 43 AE 79 66 11 D6 F4 88 16 C8 E0 12 91 26 6B 5C 7B F3 92 CA A6 F8 80";
+        let rc = parse_key(&key);
+        assert!(rc.is_ok());
+        let key = rc.unwrap();
+        assert_eq!(32, key.len());
+        assert_eq!(0x32, key[0]);
+        assert_eq!(0x80, key[31]);
+    }
+
+    #[test]
+    fn test_parse_spi() {
+        let spistr = "9A345678";
+        let rc = parse_spi(&spistr);
+        assert!(rc.is_ok());
+        assert_eq!(0x9A345678, rc.unwrap());
+    }
 }
