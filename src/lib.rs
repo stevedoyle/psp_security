@@ -339,7 +339,6 @@ pub fn psp_encrypt(
     debug!("psp_encrypt(): Key: {:02X?}", key);
     debug!("psp_encrypt(): IV:  {:02X?}", iv);
     debug!("psp_encrypt(): AAD: {:02X?}", aad);
-    debug!("psp_encrypt(): Plaintext: {:02X?}", cleartext);
 
     let payload = Payload {
         msg: cleartext,
@@ -356,8 +355,6 @@ pub fn psp_encrypt(
     };
 
     ciphertext.copy_from_slice(&ct);
-
-    debug!("psp_encrypt(): Ciphertext: {:02X?}", ciphertext);
 
     Ok(())
 }
@@ -384,7 +381,6 @@ pub fn psp_decrypt(
     debug!("psp_decrypt(): Key: {:02X?}", key);
     debug!("psp_decrypt(): IV:  {:02X?}", iv);
     debug!("psp_decrypt(): AAD: {:02X?}", aad);
-    debug!("psp_decrypt(): Ciphertext: {:02X?}", ciphertext);
 
     let payload = Payload {
         msg: ciphertext,
@@ -399,8 +395,6 @@ pub fn psp_decrypt(
             .map_err(PspError::CryptoError)?,
     };
     cleartext.copy_from_slice(&pt);
-
-    debug!("psp_decrypt(): Plaintext: {:02X?}", cleartext);
 
     Ok(())
 }
@@ -504,7 +498,6 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let ciphertext = &mut out_pkt[start_of_crypto_region..];
 
     debug!("transport_encap: AAD: {:02X?}", aad);
-    debug!("transport_encap: Cleartext: {:02x?}", cleartext);
 
     psp_encrypt(
         pkt_ctx.psp_cfg.crypto_alg,
@@ -514,11 +507,6 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         cleartext,
         ciphertext,
     )?;
-    debug!("transport_encap: Ciphertext: {:02x?}", ciphertext);
-    debug!(
-        "transport_encap: pkt after encrypt[..100]: {:02x?}",
-        out_pkt.chunks(100).next().unwrap()
-    );
 
     Ok(out_pkt)
 }
@@ -643,6 +631,30 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     Ok(out_pkt)
 }
 
+pub fn psp_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u8>, PspError> {
+    let parsed_pkt = PacketHeaders::from_ethernet_slice(in_pkt)?;
+    match parsed_pkt.transport {
+        None => Err(PspError::PacketDecapError("No UDP header".to_string())),
+        _ => Ok(()),
+    }?;
+
+    let psp_buf = parsed_pkt.payload;
+
+    let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
+        "Error parsing PSP header".to_string(),
+    ))?;
+
+    let tunnel = match in_psp.get_next_hdr() {
+        ip_number::IPV4 => true,
+        ip_number::IPV6 => true,
+        _ => false,
+    };
+    match tunnel {
+        true => psp_tunnel_decap(pkt_ctx, in_pkt),
+        false => psp_transport_decap(pkt_ctx, in_pkt),
+    }
+}
+
 /// Decapsulate a PSP transport mode packet.
 ///
 /// Input packet:
@@ -712,7 +724,9 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
-    let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
+    let spi = in_psp.get_spi();
+    pkt_ctx.psp_cfg.spi = spi;
+    let gcm_iv = get_aesgcm_iv(spi, in_psp.get_iv());
 
     derive_psp_key(pkt_ctx)?;
 
@@ -724,7 +738,6 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let cleartext = &mut out_pkt[start_of_crypt_region..];
 
     debug!("transport_decap: AAD: {:02X?}", aad);
-    debug!("transport_decap: Ciphertext: {:02x?}", ciphertext);
     psp_decrypt(
         pkt_ctx.psp_cfg.crypto_alg,
         &pkt_ctx.key,
@@ -733,7 +746,6 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         ciphertext,
         cleartext,
     )?;
-    debug!("transport_decap: Cleartext: {:02x?}", cleartext);
 
     Ok(out_pkt)
 }
@@ -814,7 +826,7 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
-    let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
+    let gcm_iv = get_aesgcm_iv(in_psp.get_spi(), in_psp.get_iv());
 
     derive_psp_key(pkt_ctx)?;
 
