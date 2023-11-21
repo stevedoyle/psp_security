@@ -25,8 +25,8 @@ use pnet_packet::{
     MutablePacket,
 };
 use psp_security::{
-    derive_psp_key, psp_transport_decap, psp_transport_encap, psp_tunnel_decap, psp_tunnel_encap,
-    CryptoAlg, PktContext, PspConfig, PspEncap, PspError, PspMasterKey,
+    derive_psp_key, psp_decap, psp_transport_encap, psp_tunnel_encap, CryptoAlg, PktContext,
+    PspConfig, PspEncap, PspError, PspMasterKey,
 };
 use rand::{thread_rng, RngCore};
 
@@ -525,7 +525,13 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     derive_psp_key(&mut pkt_ctx).unwrap();
 
     for in_pkt in pkts {
-        let out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
+        let mut out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
+        if args.error {
+            if out_pkt.len() > 0 {
+                let last = out_pkt.last_mut().unwrap();
+                *last ^= 0b0000_1000;
+            }
+        }
         let out_pcap_pkt = PcapPacket::new(in_pkt.timestamp, out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;
     }
@@ -533,10 +539,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn decrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Result<Vec<u8>, PspError> {
-    match pkt_ctx.psp_cfg.psp_encap {
-        PspEncap::Transport => psp_transport_decap(pkt_ctx, &pkt_in.data),
-        PspEncap::Tunnel => psp_tunnel_decap(pkt_ctx, &pkt_in.data),
-    }
+    psp_decap(pkt_ctx, &pkt_in.data)
 }
 
 fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
@@ -568,9 +571,10 @@ fn main() -> Result<()> {
         PspCliCommands::Decrypt(args) => decrypt_pcap_file(&args),
     };
     if let Err(err) = err {
-        eprintln!("Error: {err}")
+        eprintln!("Error: {err}");
+        std::process::exit(exitcode::DATAERR);
     }
-    Ok(())
+    std::process::exit(exitcode::OK);
 }
 
 #[cfg(test)]
