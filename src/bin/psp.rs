@@ -405,31 +405,59 @@ fn parse_cfg_file(reader: &mut BufReader<File>) -> Result<PspConfig, Box<dyn Err
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.spi = parse_spi(&line.trim())?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.spi = parse_spi(&line)?;
 
     line.clear();
     reader.read_line(&mut line)?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
     cfg.psp_encap = line.trim().parse()?;
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.crypto_alg = line.trim().parse()?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.crypto_alg = line.parse()?;
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.transport_crypt_off = line.trim().parse()?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.transport_crypt_off = line.parse()?;
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.ipv4_tunnel_crypt_off = line.trim().parse()?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.ipv4_tunnel_crypt_off = line.parse()?;
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.ipv6_tunnel_crypt_off = line.trim().parse()?;
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.ipv6_tunnel_crypt_off = line.parse()?;
 
     line.clear();
     reader.read_line(&mut line)?;
-    cfg.include_vc = parse_vc(&line.trim());
+    line = line.trim().to_string();
+    if line.len() == 0 {
+        return Ok(cfg);
+    }
+    cfg.include_vc = parse_vc(&line);
 
     debug!("Parsed cfg: {:?}", cfg);
 
@@ -447,7 +475,6 @@ fn parse_key(line: &str) -> Result<PspMasterKey, Box<dyn Error>> {
 
 fn parse_spi(spi_str: &str) -> Result<u32, Box<dyn Error>> {
     let spi = u32::from_str_radix(spi_str, 16)?;
-
     Ok(spi)
 }
 
