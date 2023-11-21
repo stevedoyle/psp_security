@@ -826,7 +826,9 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
-    let gcm_iv = get_aesgcm_iv(in_psp.get_spi(), in_psp.get_iv());
+    let spi = in_psp.get_spi();
+    pkt_ctx.psp_cfg.spi = spi;
+    let gcm_iv = get_aesgcm_iv(spi, in_psp.get_iv());
 
     derive_psp_key(pkt_ctx)?;
 
