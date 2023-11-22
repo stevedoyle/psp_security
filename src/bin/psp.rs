@@ -2,8 +2,8 @@ use std::{
     cmp::min,
     error::Error,
     ffi::OsStr,
-    fs::File,
-    io::{BufRead, BufReader},
+    fs::{self, File},
+    io::BufReader,
     net::{Ipv4Addr, Ipv6Addr},
     num::Wrapping,
     path::PathBuf,
@@ -378,86 +378,61 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
 
 fn read_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     let path = PathBuf::from(cfg_file);
-    let jsonfile: bool = match path.extension().unwrap_or(OsStr::new("cfg")).to_str() {
-        Some("json") => true,
-        _ => false,
-    };
+    match path.extension().unwrap_or(OsStr::new("cfg")).to_str() {
+        Some("json") => parse_json_cfg_file(cfg_file),
+        _ => parse_cfg_file(cfg_file),
+    }
+}
 
+fn parse_json_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     let file_in = File::open(cfg_file)?;
-    let mut reader = BufReader::new(file_in);
-    let cfg = match jsonfile {
-        true => serde_json::from_reader(reader)?,
-        false => parse_cfg_file(&mut reader)?,
-    };
+    let reader = BufReader::new(file_in);
+    let cfg = serde_json::from_reader(reader)?;
     Ok(cfg)
 }
 
-fn parse_cfg_file(reader: &mut BufReader<File>) -> Result<PspConfig, Box<dyn Error>> {
+fn parse_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     let mut cfg = PspConfig::default();
-    let mut line = String::new();
 
-    reader.read_line(&mut line)?;
-    cfg.master_keys[0] = parse_key(line.trim())?;
+    let cfg_data = fs::read_to_string(cfg_file)?;
+    let mut lines = cfg_data
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty());
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    cfg.master_keys[1] = parse_key(line.trim())?;
+    let line = lines.next().unwrap_or("");
+    cfg.master_keys[0] = parse_key(line)?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    let line = lines.next().unwrap_or("");
+    cfg.master_keys[1] = parse_key(line)?;
+
+    if let Some(line) = lines.next() {
+        cfg.spi = parse_spi(line)?;
     }
-    cfg.spi = parse_spi(&line)?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.psp_encap = line.parse()?;
     }
-    cfg.psp_encap = line.trim().parse()?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.crypto_alg = line.parse()?;
     }
-    cfg.crypto_alg = line.parse()?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.transport_crypt_off = line.parse()?;
     }
-    cfg.transport_crypt_off = line.parse()?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.ipv4_tunnel_crypt_off = line.parse()?;
     }
-    cfg.ipv4_tunnel_crypt_off = line.parse()?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.ipv6_tunnel_crypt_off = line.parse()?;
     }
-    cfg.ipv6_tunnel_crypt_off = line.parse()?;
 
-    line.clear();
-    reader.read_line(&mut line)?;
-    line = line.trim().to_string();
-    if line.len() == 0 {
-        return Ok(cfg);
+    if let Some(line) = lines.next() {
+        cfg.include_vc = parse_vc(&line);
     }
-    cfg.include_vc = parse_vc(&line);
 
     debug!("Parsed cfg: {:?}", cfg);
 
