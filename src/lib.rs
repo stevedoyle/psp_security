@@ -19,6 +19,7 @@ mod packet;
 use packet::psp::PspPacket;
 
 pub const PSP_ICV_SIZE: usize = 16;
+const PSP_VC_SIZE: usize = 8;
 const PSP_MASTER_KEY_SIZE: usize = 32;
 const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
 const PSP_CRYPT_OFFSET_UNITS: usize = 4;
@@ -104,7 +105,7 @@ bitfield! {
     pub struct PspHeaderFlags(u8);
     impl Debug;
     r, set_r: 0;
-    vc, set_vc: 1;
+    v, set_v: 1;
     version, set_version: 5, 2;
     d, set_d: 6;
     s, set_s: 7;
@@ -114,7 +115,7 @@ impl Default for PspHeaderFlags {
     fn default() -> Self {
         let mut flags = Self(0);
         flags.set_r(true);
-        flags.set_vc(false);
+        flags.set_v(false);
         flags.set_version(PspVersion::PspVer0 as u8);
         flags.set_d(false);
         flags.set_s(false);
@@ -160,6 +161,7 @@ pub struct PktContext {
     pub psp_cfg: PspConfig,
     pub key: PspDerivedKey,
     pub iv: u64,
+    pub vc: u64,
 }
 
 impl PktContext {
@@ -177,6 +179,7 @@ impl PktContext {
             },
             key: vec![0; 16],
             iv: 1,
+            vc: 0,
         }
     }
 }
@@ -234,6 +237,10 @@ pub enum PspError {
     /// header is too short to hold the PSP ICV value.
     #[error("Invalid PSP Packet Size")]
     InvalidPspPacketSize,
+
+    // The implementation does not support a feature. The string describes what is not supported.
+    #[error("Unsupported Feature: {}", .0)]
+    Unsupported(String),
 }
 
 // This is required as aes_gcm::Error doesn't implement the necessary traits for
@@ -339,6 +346,8 @@ pub fn psp_encrypt(
     debug!("psp_encrypt(): Key: {:02X?}", key);
     debug!("psp_encrypt(): IV:  {:02X?}", iv);
     debug!("psp_encrypt(): AAD: {:02X?}", aad);
+    debug!("psp_encrypt(): Cleartext len:  {}", cleartext.len());
+    debug!("psp_encrypt(): Ciphertext len: {}", ciphertext.len());
 
     let payload = Payload {
         msg: cleartext,
@@ -381,6 +390,8 @@ pub fn psp_decrypt(
     debug!("psp_decrypt(): Key: {:02X?}", key);
     debug!("psp_decrypt(): IV:  {:02X?}", iv);
     debug!("psp_decrypt(): AAD: {:02X?}", aad);
+    debug!("psp_encrypt(): Ciphertext len: {}", ciphertext.len());
+    debug!("psp_encrypt(): Cleartext len:  {}", cleartext.len());
 
     let payload = Payload {
         msg: ciphertext,
@@ -426,12 +437,21 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let (in_ip, next_protocol, in_ip_payload) = IpHeader::from_slice(in_eth_payload)?;
 
     let crypt_off = usize::from(pkt_ctx.psp_cfg.transport_crypt_off) * PSP_CRYPT_OFFSET_UNITS;
-    debug!("transport_decap: crypt_off: {crypt_off}");
+    let mut payload_crypt_off = crypt_off;
+    if pkt_ctx.psp_cfg.include_vc {
+        if crypt_off >= PSP_VC_SIZE {
+            payload_crypt_off -= PSP_VC_SIZE;
+        } else {
+            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+        }
+    }
     if crypt_off > in_ip_payload.len() {
         return Err(PspError::PacketEncapError(
             "Crypt offset too big".to_string(),
         ));
     }
+    debug!("transport_encap: crypt_off: {crypt_off}");
+    debug!("transport_encap: payload_crypt_off: {payload_crypt_off}");
 
     // Build the PSP encapsulated packet
     //   - copy the Ethernet and IP headers of the input packet.
@@ -441,8 +461,10 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     //   - Compute ICV and insert encrypted data
     //   - Insert ICV as the PSP trailer
 
-    // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let mut psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    if pkt_ctx.psp_cfg.include_vc {
+        psp_encap_len += PSP_VC_SIZE;
+    }
     let psp_udp_encap_len = psp_encap_len + UdpHeader::SERIALIZED_SIZE;
     let out_pkt_len = in_pkt.len() + psp_udp_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
@@ -467,11 +489,14 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     let mut flags = PspHeaderFlags::default();
     flags.set_version(get_psp_version(pkt_ctx.psp_cfg.crypto_alg) as u8);
-    flags.set_vc(pkt_ctx.psp_cfg.include_vc);
+    flags.set_v(pkt_ctx.psp_cfg.include_vc);
 
     let psp_hdr = &PspHeader {
         next_hdr: next_protocol,
-        hdr_ext_len: 1,
+        hdr_ext_len: match pkt_ctx.psp_cfg.include_vc {
+            true => 2,
+            false => 1,
+        },
         crypt_off: pkt_ctx.psp_cfg.transport_crypt_off,
         flags,
         spi: pkt_ctx.psp_cfg.spi,
@@ -479,25 +504,26 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     };
 
     let start_of_psp_hdr = out_pkt.len();
-    let psp_buf = bincode::DefaultOptions::new()
+    let encoder = bincode::DefaultOptions::new()
         .with_big_endian()
-        .with_fixint_encoding()
-        .serialize(psp_hdr)?;
+        .with_fixint_encoding();
+    let psp_buf = encoder.serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
+    if flags.v() {
+        out_pkt.extend_from_slice(&encoder.serialize(&pkt_ctx.vc)?);
+    }
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
 
-    out_pkt.extend_from_slice(&in_ip_payload[..crypt_off]);
-    let cleartext = &in_ip_payload[crypt_off..];
+    out_pkt.extend_from_slice(&in_ip_payload[..payload_crypt_off]);
+    let cleartext = &in_ip_payload[payload_crypt_off..];
 
     let start_of_crypto_region = out_pkt.len();
     let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
 
     out_pkt.resize(out_pkt_len, 0);
     let ciphertext = &mut out_pkt[start_of_crypto_region..];
-
-    debug!("transport_encap: AAD: {:02X?}", aad);
 
     psp_encrypt(
         pkt_ctx.psp_cfg.crypto_alg,
@@ -540,13 +566,21 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     let (in_ip, _, _) = IpHeader::from_slice(in_eth_payload)?;
 
-    let crypt_off_hdr_val = match psp_next_protocol {
+    let crypt_off_cfg_val = match psp_next_protocol {
         ip_number::IPV4 => usize::from(pkt_ctx.psp_cfg.ipv4_tunnel_crypt_off),
         ip_number::IPV6 => usize::from(pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off),
         _ => 0,
     };
-    let crypt_off = crypt_off_hdr_val * PSP_CRYPT_OFFSET_UNITS;
-    if crypt_off > in_eth_payload.len() {
+    let crypt_off = crypt_off_cfg_val * PSP_CRYPT_OFFSET_UNITS;
+    let mut payload_crypt_off = crypt_off;
+    if pkt_ctx.psp_cfg.include_vc {
+        if crypt_off >= PSP_VC_SIZE {
+            payload_crypt_off -= PSP_VC_SIZE;
+        } else {
+            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+        }
+    }
+    if payload_crypt_off > in_eth_payload.len() {
         return Err(PspError::PacketEncapError(
             "Crypto offset too big".to_string(),
         ));
@@ -561,8 +595,10 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     //   - Compute ICV and insert encrypted data
     //   - Insert ICV as the PSP trailer
 
-    // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let mut psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    if pkt_ctx.psp_cfg.include_vc {
+        psp_encap_len += PSP_VC_SIZE;
+    }
     let psp_udp_encap_len = psp_encap_len + UdpHeader::SERIALIZED_SIZE;
     let psp_udp_ip_encap_len = psp_udp_encap_len + tun_hdr_size;
     let out_pkt_len = in_pkt.len() + psp_udp_ip_encap_len;
@@ -588,12 +624,15 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     let mut flags = PspHeaderFlags::default();
     flags.set_version(get_psp_version(pkt_ctx.psp_cfg.crypto_alg) as u8);
-    flags.set_vc(pkt_ctx.psp_cfg.include_vc);
+    flags.set_v(pkt_ctx.psp_cfg.include_vc);
 
     let psp_hdr = &PspHeader {
         next_hdr: psp_next_protocol,
-        hdr_ext_len: 1,
-        crypt_off: crypt_off_hdr_val as u8,
+        hdr_ext_len: match pkt_ctx.psp_cfg.include_vc {
+            true => 2,
+            false => 1,
+        },
+        crypt_off: crypt_off_cfg_val as u8,
         flags,
         spi: pkt_ctx.psp_cfg.spi,
         iv: pkt_ctx.iv,
@@ -601,17 +640,20 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     let start_of_psp_hdr = out_pkt.len();
 
-    let psp_buf = bincode::DefaultOptions::new()
+    let encoder = bincode::DefaultOptions::new()
         .with_big_endian()
-        .with_fixint_encoding()
-        .serialize(psp_hdr)?;
+        .with_fixint_encoding();
+    let psp_buf = encoder.serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
+    if flags.v() {
+        out_pkt.extend_from_slice(&encoder.serialize(&pkt_ctx.vc)?);
+    }
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
 
-    out_pkt.extend_from_slice(&psp_payload[..crypt_off]);
-    let cleartext = &psp_payload[crypt_off..];
+    out_pkt.extend_from_slice(&psp_payload[..payload_crypt_off]);
+    let cleartext = &psp_payload[payload_crypt_off..];
 
     let start_of_crypto_region = out_pkt.len();
     let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
@@ -686,8 +728,15 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         return Err(PspError::InvalidPspPacketSize);
     }
 
-    let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    let mut crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
     debug!("transport_decap: crypt_off: {crypt_off}");
+    if in_psp.get_v() == 1 {
+        if crypt_off >= PSP_VC_SIZE {
+            crypt_off -= PSP_VC_SIZE;
+        } else {
+            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+        }
+    }
     if crypt_off > payload.len() {
         return Err(PspError::PacketDecapError(
             "Invalid crypto offset".to_string(),
@@ -700,8 +749,11 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     //   - Skip the PSP header
     //   - Copy crypt_off bytes from input packet starting at the L4 header
 
-    // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let vc_len = match in_psp.get_v() {
+        0 => 0,
+        _ => PSP_VC_SIZE,
+    };
+    let psp_encap_len = PspPacket::minimum_packet_size() + vc_len + PSP_ICV_SIZE;
     let psp_and_udp_encap_len = UdpHeader::SERIALIZED_SIZE + psp_encap_len;
     let out_pkt_len = in_pkt.len() - psp_and_udp_encap_len;
     let mut out_pkt = Vec::<u8>::with_capacity(out_pkt_len);
@@ -721,6 +773,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
+    // crypt_off already incorporates the vc len
     let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
@@ -796,7 +849,14 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
         return Err(PspError::InvalidPspPacketSize);
     }
 
-    let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    let mut crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    if in_psp.get_v() == 1 {
+        if crypt_off >= PSP_VC_SIZE {
+            crypt_off -= PSP_VC_SIZE;
+        } else {
+            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+        }
+    }
     if crypt_off > payload.len() {
         return Err(PspError::PacketDecapError(
             "Invalid crypto offset".to_string(),
@@ -812,8 +872,11 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     //   - Decrypt the remainder of the input packet and write the decrypted content to the output
     //     packet.
 
-    // TODO: Cater for PSP packet headers with non-minimum VC data.
-    let psp_encap_len = PspPacket::minimum_packet_size() + PSP_ICV_SIZE;
+    let vc_len = match in_psp.get_v() {
+        0 => 0,
+        _ => PSP_VC_SIZE,
+    };
+    let psp_encap_len = PspPacket::minimum_packet_size() + vc_len + PSP_ICV_SIZE;
     let psp_udp_encap_len = UdpHeader::SERIALIZED_SIZE + psp_encap_len;
     let psp_udp_ip_encap_len = ip_hdr_size + psp_udp_encap_len;
     let out_pkt_len = in_pkt.len() - psp_udp_ip_encap_len;
@@ -823,6 +886,7 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
+    // crypt_off already incorporates vc len
     let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
@@ -994,6 +1058,7 @@ mod tests {
             + PSP_ICV_SIZE;
         let mut pkt_ctx = PktContext::default();
         pkt_ctx.psp_cfg.spi = 1;
+        pkt_ctx.psp_cfg.transport_crypt_off = 1;
 
         let out_pkt = psp_transport_encap(&mut pkt_ctx, &in_pkt)?;
         assert_eq!(out_pkt_len, out_pkt.len());
@@ -1024,6 +1089,57 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn check_transport_vc_encap() -> Result<(), Box<dyn std::error::Error>> {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 32)
+            .udp(21, 1234);
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut in_pkt = Vec::<u8>::with_capacity(builder.size(payload.len()));
+        builder.write(&mut in_pkt, &payload)?;
+
+        let out_pkt_len = in_pkt.len()
+            + UdpHeader::SERIALIZED_SIZE
+            + PspPacket::minimum_packet_size()
+            + PSP_VC_SIZE
+            + PSP_ICV_SIZE;
+        let mut pkt_ctx = PktContext::default();
+        pkt_ctx.psp_cfg.spi = 1;
+        pkt_ctx.psp_cfg.include_vc = true;
+        pkt_ctx.vc = 0xCAFE;
+        pkt_ctx.psp_cfg.transport_crypt_off = 4;
+
+        let out_pkt = psp_transport_encap(&mut pkt_ctx, &in_pkt)?;
+        assert_eq!(out_pkt_len, out_pkt.len());
+
+        let pkt = PacketHeaders::from_ethernet_slice(&out_pkt)?;
+        assert!(pkt.link.is_some());
+        assert_eq!(pkt.link.unwrap().ether_type, EtherType::Ipv4 as u16);
+        assert!(pkt.ip.is_some());
+        match pkt.ip.unwrap() {
+            IpHeader::Version4(ip, _) => {
+                assert_eq!(ip.source, [192, 168, 1, 1]);
+                assert_eq!(ip.destination, [192, 168, 1, 2]);
+                assert_eq!(ip.protocol, IpNumber::Udp as u8);
+            }
+            _ => assert!(false),
+        };
+        assert!(pkt.transport.is_some());
+        match pkt.transport.unwrap() {
+            TransportHeader::Udp(udp) => {
+                assert_eq!(udp.destination_port, PSP_UDP_PORT);
+            }
+            _ => assert!(false),
+        }
+        let psp = PspPacket::new(pkt.payload).unwrap();
+        assert_eq!(psp.get_spi(), pkt_ctx.psp_cfg.spi);
+        assert_eq!(psp.get_version(), PspVersion::PspVer0 as u8);
+        assert_eq!(psp.get_v(), 1);
+        assert_eq!(psp.get_vc(), vec![0xCAFE]);
+
+        Ok(())
+    }
+
     fn get_pkt_ctx(ver: PspVersion) -> PktContext {
         let mut pkt_ctx = PktContext::new();
         match ver {
@@ -1035,6 +1151,9 @@ mod tests {
                 ];
                 pkt_ctx.iv = 0x12345678_9ABCDEFF;
                 pkt_ctx.psp_cfg.spi = 0x12345678;
+                pkt_ctx.psp_cfg.transport_crypt_off = 1;
+                pkt_ctx.psp_cfg.ipv4_tunnel_crypt_off = 6;
+                pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off = 11;
             }
             PspVersion::PspVer1 => {
                 pkt_ctx.psp_cfg.crypto_alg = CryptoAlg::AesGcm256;

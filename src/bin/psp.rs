@@ -36,16 +36,6 @@ enum IPVersion {
     Ipv6,
 }
 
-// #[derive(Debug, Default, Serialize, Deserialize)]
-// struct PspConfig {
-//     master_keys: [PspMasterKey; 2],
-//     spi: u32,
-//     mode: PspEncap,
-//     algo: CryptoAlg,
-//     crypto_offset: u32,
-//     include_vc: bool,
-// }
-
 #[derive(Parser)]
 #[command(name = "psp")]
 #[command(bin_name = "psp")]
