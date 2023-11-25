@@ -24,6 +24,7 @@ const PSP_MASTER_KEY_SIZE: usize = 32;
 const PSP_SPI_KEY_SELECTOR_BIT: u32 = 31;
 const PSP_CRYPT_OFFSET_UNITS: usize = 4;
 const PSP_UDP_PORT: u16 = 1000;
+const PSP_HDR_FIXED_LEN: u8 = 16;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq)]
@@ -405,7 +406,9 @@ pub fn psp_decrypt(
             .decrypt(iv.into(), payload)
             .map_err(PspError::CryptoError)?,
     };
-    cleartext.copy_from_slice(&pt);
+    // Not all of the decrypted content needs to be copied. e.g. when an encrypted vc is present.
+    let drop_offset = pt.len() - cleartext.len();
+    cleartext.copy_from_slice(&pt[drop_offset..]);
 
     Ok(())
 }
@@ -438,11 +441,14 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     let crypt_off = usize::from(pkt_ctx.psp_cfg.transport_crypt_off) * PSP_CRYPT_OFFSET_UNITS;
     let mut payload_crypt_off = crypt_off;
+    let mut encrypted_vc = false;
+
     if pkt_ctx.psp_cfg.include_vc {
         if crypt_off >= PSP_VC_SIZE {
             payload_crypt_off -= PSP_VC_SIZE;
         } else {
-            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+            encrypted_vc = true;
+            payload_crypt_off = 0;
         }
     }
     if crypt_off > in_ip_payload.len() {
@@ -509,30 +515,52 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         .with_fixint_encoding();
     let psp_buf = encoder.serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
+
+    let end_of_iv = out_pkt.len();
+    let start_of_crypto_region = end_of_iv + crypt_off;
+
     if flags.v() {
         out_pkt.extend_from_slice(&encoder.serialize(&pkt_ctx.vc)?);
     }
+    let start_of_payload_region = out_pkt.len();
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
 
     out_pkt.extend_from_slice(&in_ip_payload[..payload_crypt_off]);
-    let cleartext = &in_ip_payload[payload_crypt_off..];
-
-    let start_of_crypto_region = out_pkt.len();
+    out_pkt.resize(out_pkt_len, 0);
     let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
 
-    out_pkt.resize(out_pkt_len, 0);
-    let ciphertext = &mut out_pkt[start_of_crypto_region..];
+    if encrypted_vc {
+        let mut cleartext: Vec<u8> = Vec::with_capacity(in_ip_payload.len() + PSP_VC_SIZE);
+        cleartext.extend_from_slice(&out_pkt[start_of_crypto_region..start_of_payload_region]);
+        cleartext.extend_from_slice(&in_ip_payload[..]);
 
-    psp_encrypt(
-        pkt_ctx.psp_cfg.crypto_alg,
-        &pkt_ctx.key,
-        &gcm_iv,
-        &aad,
-        cleartext,
-        ciphertext,
-    )?;
+        let ciphertext = &mut out_pkt[start_of_crypto_region..];
+
+        psp_encrypt(
+            pkt_ctx.psp_cfg.crypto_alg,
+            &pkt_ctx.key,
+            &gcm_iv,
+            &aad,
+            &cleartext,
+            ciphertext,
+        )?;
+    } else {
+        // Simpler case, no need to copy
+        let cleartext = &in_ip_payload[payload_crypt_off..];
+
+        let ciphertext = &mut out_pkt[start_of_crypto_region..];
+
+        psp_encrypt(
+            pkt_ctx.psp_cfg.crypto_alg,
+            &pkt_ctx.key,
+            &gcm_iv,
+            &aad,
+            cleartext,
+            ciphertext,
+        )?;
+    }
 
     Ok(out_pkt)
 }
@@ -573,11 +601,12 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     };
     let crypt_off = crypt_off_cfg_val * PSP_CRYPT_OFFSET_UNITS;
     let mut payload_crypt_off = crypt_off;
+    let mut encrypted_vc = false;
     if pkt_ctx.psp_cfg.include_vc {
         if crypt_off >= PSP_VC_SIZE {
             payload_crypt_off -= PSP_VC_SIZE;
         } else {
-            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+            encrypted_vc = true;
         }
     }
     if payload_crypt_off > in_eth_payload.len() {
@@ -645,30 +674,70 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
         .with_fixint_encoding();
     let psp_buf = encoder.serialize(psp_hdr)?;
     out_pkt.extend_from_slice(&psp_buf);
+
+    let end_of_iv = out_pkt.len();
+    let start_of_crypto_region = end_of_iv + crypt_off;
+
     if flags.v() {
         out_pkt.extend_from_slice(&encoder.serialize(&pkt_ctx.vc)?);
     }
+
+    let start_of_payload_region = out_pkt.len();
 
     let gcm_iv = get_aesgcm_iv(pkt_ctx.psp_cfg.spi, pkt_ctx.iv);
     pkt_ctx.iv += 1;
 
     out_pkt.extend_from_slice(&psp_payload[..payload_crypt_off]);
-    let cleartext = &psp_payload[payload_crypt_off..];
-
-    let start_of_crypto_region = out_pkt.len();
+    out_pkt.resize(out_pkt_len, 0);
     let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
 
-    out_pkt.resize(out_pkt_len, 0);
-    let ciphertext = &mut out_pkt[start_of_crypto_region..];
+    if encrypted_vc {
+        let mut cleartext: Vec<u8> = Vec::with_capacity(psp_payload.len() + PSP_VC_SIZE);
+        cleartext.extend_from_slice(&out_pkt[start_of_crypto_region..start_of_payload_region]);
+        cleartext.extend_from_slice(psp_payload);
 
-    psp_encrypt(
-        pkt_ctx.psp_cfg.crypto_alg,
-        &pkt_ctx.key,
-        &gcm_iv,
-        &aad,
-        cleartext,
-        ciphertext,
-    )?;
+        let ciphertext = &mut out_pkt[start_of_crypto_region..];
+
+        psp_encrypt(
+            pkt_ctx.psp_cfg.crypto_alg,
+            &pkt_ctx.key,
+            &gcm_iv,
+            &aad,
+            &cleartext,
+            ciphertext,
+        )?;
+    } else {
+        // Simpler case, no need to copy
+        let cleartext = &psp_payload[payload_crypt_off..];
+
+        let ciphertext = &mut out_pkt[start_of_crypto_region..];
+
+        psp_encrypt(
+            pkt_ctx.psp_cfg.crypto_alg,
+            &pkt_ctx.key,
+            &gcm_iv,
+            &aad,
+            cleartext,
+            ciphertext,
+        )?;
+    }
+
+    // out_pkt.extend_from_slice(&psp_payload[..payload_crypt_off]);
+    // let cleartext = &psp_payload[payload_crypt_off..];
+
+    // let aad = out_pkt[start_of_psp_hdr..start_of_crypto_region].to_vec();
+
+    // out_pkt.resize(out_pkt_len, 0);
+    // let ciphertext = &mut out_pkt[start_of_crypto_region..];
+
+    // psp_encrypt(
+    //     pkt_ctx.psp_cfg.crypto_alg,
+    //     &pkt_ctx.key,
+    //     &gcm_iv,
+    //     &aad,
+    //     cleartext,
+    //     ciphertext,
+    // )?;
 
     Ok(out_pkt)
 }
@@ -721,23 +790,23 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
         "Error parsing PSP header".to_string(),
     ))?;
-    let psp_hdr_len = in_psp.get_hdr_ext_len() * 8 + 8;
 
     let payload = in_psp.payload();
     if payload.len() < PSP_ICV_SIZE {
         return Err(PspError::InvalidPspPacketSize);
     }
 
-    let mut crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
     debug!("transport_decap: crypt_off: {crypt_off}");
+    let mut payload_crypt_off = crypt_off;
     if in_psp.get_v() == 1 {
         if crypt_off >= PSP_VC_SIZE {
-            crypt_off -= PSP_VC_SIZE;
+            payload_crypt_off -= PSP_VC_SIZE;
         } else {
-            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+            payload_crypt_off = 0;
         }
     }
-    if crypt_off > payload.len() {
+    if payload_crypt_off > payload.len() {
         return Err(PspError::PacketDecapError(
             "Invalid crypto offset".to_string(),
         ));
@@ -773,8 +842,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
-    // crypt_off already incorporates the vc len
-    let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
+    let aad_len: usize = usize::from(PSP_HDR_FIXED_LEN) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
     let spi = in_psp.get_spi();
@@ -783,14 +851,13 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 
     derive_psp_key(pkt_ctx)?;
 
-    let ciphertext = &in_psp.payload()[crypt_off..];
-    out_pkt.extend_from_slice(&in_psp.payload()[..crypt_off]);
+    let ciphertext = &parsed_pkt.payload[aad_len..];
+    out_pkt.extend_from_slice(&in_psp.payload()[..payload_crypt_off]);
 
-    let start_of_crypt_region = out_pkt.len();
+    let start_of_decrypt_region = out_pkt.len();
     out_pkt.resize(out_pkt_len, 0);
-    let cleartext = &mut out_pkt[start_of_crypt_region..];
+    let cleartext = &mut out_pkt[start_of_decrypt_region..];
 
-    debug!("transport_decap: AAD: {:02X?}", aad);
     psp_decrypt(
         pkt_ctx.psp_cfg.crypto_alg,
         &pkt_ctx.key,
@@ -842,22 +909,22 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     let in_psp = PspPacket::new(psp_buf).ok_or(PspError::PacketDecapError(
         "Error parsing PSP header".to_string(),
     ))?;
-    let psp_hdr_len = in_psp.get_hdr_ext_len() * 8 + 8;
 
     let payload = in_psp.payload();
     if payload.len() < PSP_ICV_SIZE {
         return Err(PspError::InvalidPspPacketSize);
     }
 
-    let mut crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    let crypt_off = usize::from(in_psp.get_crypt_offset()) * PSP_CRYPT_OFFSET_UNITS;
+    let mut payload_crypt_off = crypt_off;
     if in_psp.get_v() == 1 {
         if crypt_off >= PSP_VC_SIZE {
-            crypt_off -= PSP_VC_SIZE;
+            payload_crypt_off -= PSP_VC_SIZE;
         } else {
-            return Err(PspError::Unsupported("Encrypted VC".to_string()));
+            payload_crypt_off = 0;
         }
     }
-    if crypt_off > payload.len() {
+    if payload_crypt_off > payload.len() {
         return Err(PspError::PacketDecapError(
             "Invalid crypto offset".to_string(),
         ));
@@ -887,7 +954,7 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     pkt_ctx.psp_cfg.crypto_alg = get_psp_crypto_alg(in_psp.get_version().try_into()?);
 
     // crypt_off already incorporates vc len
-    let aad_len: usize = usize::from(psp_hdr_len) + crypt_off;
+    let aad_len: usize = usize::from(PSP_HDR_FIXED_LEN) + crypt_off;
     let aad = parsed_pkt.payload[..aad_len].to_vec();
 
     let spi = in_psp.get_spi();
@@ -896,12 +963,12 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 
     derive_psp_key(pkt_ctx)?;
 
-    let ciphertext = &in_psp.payload()[crypt_off..];
-    out_pkt.extend_from_slice(&in_psp.payload()[..crypt_off]);
+    let ciphertext = &parsed_pkt.payload[aad_len..];
+    out_pkt.extend_from_slice(&in_psp.payload()[..payload_crypt_off]);
 
-    let start_of_crypt_region = out_pkt.len();
+    let start_of_decrypt_region = out_pkt.len();
     out_pkt.resize(out_pkt_len, 0);
-    let cleartext = &mut out_pkt[start_of_crypt_region..];
+    let cleartext = &mut out_pkt[start_of_decrypt_region..];
 
     psp_decrypt(
         pkt_ctx.psp_cfg.crypto_alg,
