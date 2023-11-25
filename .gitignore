@@ -1,2 +1,6 @@
 /target
+*.cfg
+*.pcap
+*.sh
+*.txt
 .vscode
