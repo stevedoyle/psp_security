@@ -1241,6 +1241,17 @@ mod tests {
         orig_pkt
     }
 
+    fn get_ipv4_empty_test_pkt() -> Vec<u8> {
+        // Build a cleartext packet
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 32)
+            .udp(21, 1234);
+        let payload = [0u8; 0];
+        let mut orig_pkt = Vec::<u8>::with_capacity(builder.size(payload.len()));
+        builder.write(&mut orig_pkt, &payload).unwrap();
+        orig_pkt
+    }
+
     fn get_ipv6_test_pkt() -> Vec<u8> {
         // Build a cleartext packet
         let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
@@ -1540,6 +1551,36 @@ mod tests {
         pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off = 1;
         let mut decap_pkt_ctx = pkt_ctx.clone();
         let orig_pkt = get_ipv6_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_tunnel_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_pspv1_transport_ipv4_empty() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer1);
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv4_empty_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_transport_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_transport_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_pspv1_tunnel_ipv4_empty() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer1);
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv4_empty_test_pkt();
 
         derive_psp_key(&mut pkt_ctx)?;
 
