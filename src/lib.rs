@@ -885,20 +885,14 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u8>, PspError> {
     let parsed_pkt = PacketHeaders::from_ethernet_slice(in_pkt)?;
 
-    // TODO: Check if there is a more idomatic way of unwrapping and generating an error.
-    let eth = match parsed_pkt.link {
-        Some(eth) => Ok(eth),
-        _ => Err(PspError::PacketDecapError(
-            "Unsupported packet type".to_string(),
-        )),
-    }?;
+    let eth = parsed_pkt.link.ok_or(PspError::PacketDecapError(
+        "Unsupported packet type".to_string(),
+    ))?;
 
-    let ip_hdr_size = match parsed_pkt.ip {
-        Some(ip) => Ok(ip.header_len()),
-        _ => Err(PspError::PacketDecapError(
-            "Unsupported packet type".to_string(),
-        )),
-    }?;
+    let ip_hdr = parsed_pkt.ip.ok_or(PspError::PacketDecapError(
+        "Unsupported packet type".to_string(),
+    ))?;
+    let ip_hdr_size = ip_hdr.header_len();
 
     match parsed_pkt.transport {
         Some(TransportHeader::Udp(_)) => Ok(()),
@@ -1494,6 +1488,56 @@ mod tests {
     #[test_log::test]
     fn test_pspv1_tunnel_encap_decap_ipv6() -> Result<(), PspError> {
         let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer1);
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv6_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_tunnel_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_tunnel_encap_decap_ipv6_vc() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        pkt_ctx.psp_cfg.include_vc = true;
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv6_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_tunnel_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_tunnel_encap_decap_ipv6_vc_no_co() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        pkt_ctx.psp_cfg.include_vc = true;
+        pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off = 0;
+        let mut decap_pkt_ctx = pkt_ctx.clone();
+        let orig_pkt = get_ipv6_test_pkt();
+
+        derive_psp_key(&mut pkt_ctx)?;
+
+        let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &orig_pkt)?;
+        let decap_pkt = psp_tunnel_decap(&mut decap_pkt_ctx, &encap_pkt)?;
+        assert_eq!(orig_pkt, decap_pkt);
+
+        Ok(())
+    }
+
+    #[test_log::test]
+    fn test_tunnel_encap_decap_ipv6_vc_partial_enc() -> Result<(), PspError> {
+        let mut pkt_ctx = get_pkt_ctx(PspVersion::PspVer0);
+        pkt_ctx.psp_cfg.include_vc = true;
+        pkt_ctx.psp_cfg.ipv6_tunnel_crypt_off = 1;
         let mut decap_pkt_ctx = pkt_ctx.clone();
         let orig_pkt = get_ipv6_test_pkt();
 
