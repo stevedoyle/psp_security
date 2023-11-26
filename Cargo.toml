@@ -35,6 +35,7 @@ log = "0.4.20"
 env_logger = "0.10.1"
 hex = "0.4.3"
 exitcode = "1.1.2"
+clap-num = "1.0.2"
 
 [dev-dependencies]
 test-log = "0.2.13"

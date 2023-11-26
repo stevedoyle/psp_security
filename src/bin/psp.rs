@@ -13,6 +13,7 @@ use std::{
 use anyhow::Result;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_num::maybe_hex;
 use log::{debug, info};
 use pcap_file::pcap::{PcapPacket, PcapReader, PcapWriter};
 use pnet::{packet::ethernet::EtherTypes, util::MacAddr};
@@ -117,7 +118,7 @@ struct CreatePcapArgs {
 #[command(about, long_about)]
 struct CreateConfigArgs {
     /// SPI. 32b hex value. Upper bit selects the master key
-    #[arg(short, long, default_value_t = 0x9A345678)]
+    #[arg(short, long, value_parser=maybe_hex::<u32>, default_value_t = 0x9A345678)]
     spi: u32,
 
     /// Encap mode: Tunnel or Transport

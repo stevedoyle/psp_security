@@ -1,5 +1,6 @@
 /target
 *.cfg
+*.json
 *.pcap
 *.sh
 *.txt
