@@ -314,7 +314,7 @@ fn create_pcap_file(args: &CreatePcapArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn key_to_string(key: &[u8]) -> String {
-    key.into_iter()
+    key.iter()
         .map(|b| format!("{:02X}", b))
         .collect::<Vec<_>>()
         .join(" ")
@@ -355,7 +355,7 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
         cfg_parts.push(format!("{}", cfg.transport_crypt_off));
         cfg_parts.push(format!("{}", cfg.ipv4_tunnel_crypt_off));
         cfg_parts.push(format!("{}", cfg.ipv6_tunnel_crypt_off));
-        cfg_parts.push(format!("{}", vc_to_string(cfg.include_vc)));
+        cfg_parts.push(vc_to_string(cfg.include_vc));
 
         let cfg_string: String = cfg_parts.join("\n");
         info!("{cfg_string}");
@@ -421,7 +421,7 @@ fn parse_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     }
 
     if let Some(line) = lines.next() {
-        cfg.include_vc = parse_vc(&line);
+        cfg.include_vc = parse_vc(line);
     }
 
     debug!("Parsed cfg: {:?}", cfg);
@@ -444,10 +444,7 @@ fn parse_spi(spi_str: &str) -> Result<u32, Box<dyn Error>> {
 }
 
 fn parse_vc(vc_str: &str) -> bool {
-    match vc_str {
-        "vc" => true,
-        _ => false,
-    }
+    matches!(vc_str, "vc")
 }
 
 fn create_command(args: &CreateArgs) -> Result<(), Box<dyn Error>> {
@@ -491,11 +488,9 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 
     for in_pkt in pkts {
         let mut out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
-        if args.error {
-            if out_pkt.len() > 0 {
-                let last = out_pkt.last_mut().unwrap();
-                *last ^= 0b0000_1000;
-            }
+        if args.error && !out_pkt.is_empty() {
+            let last = out_pkt.last_mut().unwrap();
+            *last ^= 0b0000_1000;
         }
         let out_pcap_pkt = PcapPacket::new(in_pkt.timestamp, out_pkt.len() as u32, &out_pkt);
         pcap_writer.write_packet(&out_pcap_pkt)?;

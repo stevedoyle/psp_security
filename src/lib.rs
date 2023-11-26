@@ -534,7 +534,7 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     if encrypted_vc {
         let mut cleartext: Vec<u8> = Vec::with_capacity(in_ip_payload.len() + PSP_VC_SIZE);
         cleartext.extend_from_slice(&out_pkt[start_of_crypto_region..start_of_payload_region]);
-        cleartext.extend_from_slice(&in_ip_payload[..]);
+        cleartext.extend_from_slice(in_ip_payload);
 
         let ciphertext = &mut out_pkt[start_of_crypto_region..];
 
@@ -755,14 +755,9 @@ pub fn psp_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u8>, Psp
         "Error parsing PSP header".to_string(),
     ))?;
 
-    let tunnel = match in_psp.get_next_hdr() {
-        ip_number::IPV4 => true,
-        ip_number::IPV6 => true,
-        _ => false,
-    };
-    match tunnel {
-        true => psp_tunnel_decap(pkt_ctx, in_pkt),
-        false => psp_transport_decap(pkt_ctx, in_pkt),
+    match in_psp.get_next_hdr() {
+        ip_number::IPV4 | ip_number::IPV6 => psp_tunnel_decap(pkt_ctx, in_pkt),
+        _ => psp_transport_decap(pkt_ctx, in_pkt),
     }
 }
 
