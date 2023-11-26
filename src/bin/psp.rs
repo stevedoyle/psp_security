@@ -484,7 +484,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    derive_psp_key(&mut pkt_ctx).unwrap();
+    derive_psp_key(&mut pkt_ctx);
 
     for in_pkt in pkts {
         let mut out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
@@ -512,7 +512,7 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    derive_psp_key(&mut pkt_ctx).unwrap();
+    derive_psp_key(&mut pkt_ctx);
 
     for in_pkt in pkts {
         let out_pkt = decrypt_pkt(&mut pkt_ctx, &in_pkt)?;
