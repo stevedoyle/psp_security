@@ -1,3 +1,4 @@
+Copyright 2023 Stephen Doyle
 
                                  Apache License
                            Version 2.0, January 2004
