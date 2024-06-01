@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: © 2023 Stephen Doyle
+// SPDX-License-Identifier: Apache 2.0
+
 use std::{
     cmp::min,
     error::Error,
