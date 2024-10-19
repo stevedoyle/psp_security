@@ -7,7 +7,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File},
     io::BufReader,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::Wrapping,
     path::PathBuf,
     time::Duration,
@@ -28,9 +28,10 @@ use pnet_packet::{
     udp::MutableUdpPacket,
     MutablePacket,
 };
+use pretty_hex::PrettyHex;
 use psp_security::{
-    derive_psp_key, psp_decap, psp_transport_encap, psp_tunnel_encap, CryptoAlg, PktContext,
-    PspConfig, PspEncap, PspError, PspMasterKey,
+    derive_psp_key, psp_decap_eth, psp_transport_encap, psp_tunnel_encap, CryptoAlg, PktContext,
+    PspConfig, PspEncap, PspError, PspMasterKey, PspSocket, PspSocketOptions,
 };
 use rand::{thread_rng, RngCore};
 
@@ -71,6 +72,12 @@ enum PspCliCommands {
     /// Then writes each cleartext packet to a pcap output file.
     ///
     Decrypt(DecryptArgs),
+
+    /// A client application that sends data over a PSP connection to a server.
+    Client(ClientArgs),
+
+    /// A server application that receives data over a PSP connection.
+    Server(ServerArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -194,6 +201,42 @@ struct DecryptArgs {
     /// Output pcap file where the decrypted packet(s) will be written
     #[arg(short, long, default_value_t = String::from("psp_decrypt.pcap"))]
     output: String,
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about, long_about, verbatim_doc_comment)]
+struct ClientArgs {
+    /// Enable verbose mode
+    #[arg(short, long, default_value_t = false)]
+    verbose: bool,
+
+    /// PSP encryption configuration file.
+    #[arg(short, default_value_t = String::from("psp_encrypt.cfg"))]
+    cfg_file: String,
+
+    /// Server address
+    #[arg(short, long, default_value_t = Ipv4Addr::new(127, 0, 0, 1))]
+    addr: Ipv4Addr,
+
+    /// Server port
+    #[arg(short, long, default_value_t = 1000)]
+    port: u16,
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about, long_about, verbatim_doc_comment)]
+struct ServerArgs {
+    /// Enable verbose mode
+    #[arg(short, long, default_value_t = false)]
+    verbose: bool,
+
+    /// PSP encryption configuration file.
+    #[arg(short, default_value_t = String::from("psp_encrypt.cfg"))]
+    cfg_file: String,
+
+    /// Server port
+    #[arg(short, long, default_value_t = 1000)]
+    port: u16,
 }
 
 fn create_ipv4_packet(
@@ -488,7 +531,11 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    derive_psp_key(&mut pkt_ctx);
+    pkt_ctx.key = derive_psp_key(
+        pkt_ctx.psp_cfg.spi,
+        pkt_ctx.psp_cfg.crypto_alg,
+        &pkt_ctx.psp_cfg.master_keys,
+    );
 
     for in_pkt in pkts {
         let mut out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
@@ -503,7 +550,7 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn decrypt_pkt(pkt_ctx: &mut PktContext, pkt_in: &PcapPacket) -> Result<Vec<u8>, PspError> {
-    psp_decap(pkt_ctx, &pkt_in.data)
+    psp_decap_eth(pkt_ctx, &pkt_in.data)
 }
 
 fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
@@ -516,7 +563,11 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    derive_psp_key(&mut pkt_ctx);
+    pkt_ctx.key = derive_psp_key(
+        pkt_ctx.psp_cfg.spi,
+        pkt_ctx.psp_cfg.crypto_alg,
+        &pkt_ctx.psp_cfg.master_keys,
+    );
 
     for in_pkt in pkts {
         let out_pkt = decrypt_pkt(&mut pkt_ctx, &in_pkt)?;
@@ -526,6 +577,68 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Echo Client
+fn client(args: &ClientArgs) -> Result<(), Box<dyn Error>> {
+    println!("{args:?}");
+
+    let cfg = read_cfg_file(&args.cfg_file)?;
+    let key = derive_psp_key(cfg.spi, cfg.crypto_alg, &cfg.master_keys);
+
+    debug!("SPI: {:08X}", cfg.spi);
+    debug!("Derived Key: {}", key.hex_dump());
+
+    let msg = "Hello, world!";
+
+    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+    let socket = PspSocket::bind("0.0.0.0:0", socket_opts).expect("Couldn't bind to address");
+
+    // Send the PSP packet to the server
+    let server = SocketAddr::new(IpAddr::V4(args.addr), args.port);
+    println!("Sending to: {}", server);
+    socket
+        .send_to(msg.as_bytes(), server)
+        .expect("Error on send");
+
+    let mut buf = [0; 2048];
+    let (amt, _src) = socket.recv_from(&mut buf)?;
+
+    let resp = &buf[..amt];
+    println!("Payload: {:?}", resp.hex_dump());
+
+    Ok(())
+}
+
+/// Echo server
+fn server(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
+    println!("{args:?}");
+
+    let cfg = read_cfg_file(&args.cfg_file)?;
+    let key = derive_psp_key(cfg.spi, cfg.crypto_alg, &cfg.master_keys);
+
+    debug!("SPI: {:08X}", cfg.spi);
+    debug!("Derived Key: {}", key.hex_dump());
+
+    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+
+    // Listen on the selected PSP port
+    // For each packet received, decrypt the packet and print the payload
+
+    let sock_addr = format!("[::]:{}", args.port);
+    let socket = PspSocket::bind(&sock_addr, socket_opts).expect("Couldn't bind to address");
+    let mut buf = [0u8; 1500];
+    loop {
+        let (amt, src) = socket.recv_from(&mut buf)?;
+        let pkt = PcapPacket::new(Duration::new(0, 0), amt as u32, &buf[..amt]);
+        info!("Received packet from: {:?}", src);
+        info!("Packet: {:?}", pkt);
+        info!("Payload: {:?}", pkt.data.hex_dump());
+
+        // Redeclare `buf` as slice of the received data and send data back to origin.
+        let buf = &mut buf[..amt];
+        socket.send_to(buf, &src)?;
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -533,6 +646,8 @@ fn main() -> Result<()> {
         PspCliCommands::Create(args) => create_command(&args),
         PspCliCommands::Encrypt(args) => encrypt_pcap_file(&args),
         PspCliCommands::Decrypt(args) => decrypt_pcap_file(&args),
+        PspCliCommands::Client(args) => client(&args),
+        PspCliCommands::Server(args) => server(&args),
     };
     if let Err(err) = err {
         eprintln!("Error: {err}");

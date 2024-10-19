@@ -69,6 +69,12 @@ tcpdump -X -r decrypted.pcap > decrypted.txt
 diff cleartext.txt decrypted.txt
 ```
 
+#### PSP Example Client / Server
+
+The `psp server` and `psp client` utilities implement an example client-server
+arrangement which establishes a PSP connection, in transport mode, between a
+client and a server.
+
 ### Command Details
 
 #### psp encrypt
