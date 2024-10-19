@@ -75,6 +75,10 @@ The `psp server` and `psp client` utilities implement an example client-server
 arrangement which establishes a PSP connection, in transport mode, between a
 client and a server.
 
+`psp server -p 10001`
+
+`psp client -p 10001`
+
 ### Command Details
 
 #### psp encrypt
