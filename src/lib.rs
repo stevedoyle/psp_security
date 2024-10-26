@@ -5,7 +5,9 @@ use std::{
 };
 
 use aes::Aes256;
-use aes_gcm::Aes256Gcm;
+use aws_lc_rs::{aead::{
+    nonce_sequence, Aad, BoundKey, OpeningKey, SealingKey, UnboundKey, AES_128_GCM, AES_256_GCM
+}, error};
 use bincode::Options;
 use bitfield::bitfield;
 use clap::ValueEnum;
@@ -206,7 +208,7 @@ pub enum PspError {
     /// Represents a crypto error. Crypto errors can occur during PSP packet
     /// encryption or decryption.
     #[error("PSP Crypto Error: {}", .0)]
-    CryptoError(aes_gcm::Error),
+    CryptoError(#[from] error::Unspecified),
 
     /// Serialization errors occur when converting PSP headers into a byte
     /// stream.
@@ -251,14 +253,6 @@ pub enum PspError {
     // The implementation does not support a feature. The string describes what is not supported.
     #[error("Unsupported Feature: {}", .0)]
     Unsupported(String),
-}
-
-// This is required as aes_gcm::Error doesn't implement the necessary traits for
-// it to be used with thiserror #[from]
-impl From<aes_gcm::Error> for PspError {
-    fn from(other: aes_gcm::Error) -> Self {
-        Self::CryptoError(other)
-    }
 }
 
 /// PspSocket is a socket that encapsulates and decapsulates packets in PSP.
@@ -486,32 +480,34 @@ pub fn psp_encrypt(
     cleartext: &[u8],
     ciphertext: &mut [u8],
 ) -> Result<(), PspError> {
-    use aes_gcm::{
-        aead::{Aead, KeyInit, Payload},
-        Aes128Gcm,
-    };
-
     debug!("psp_encrypt(): Key: {:02X?}", key);
     debug!("psp_encrypt(): IV:  {:02X?}", iv);
     debug!("psp_encrypt(): AAD: {:02X?}", aad);
     debug!("psp_encrypt(): Cleartext len:  {}", cleartext.len());
     debug!("psp_encrypt(): Ciphertext len: {}", ciphertext.len());
 
-    let payload = Payload {
-        msg: cleartext,
-        aad,
-    };
+    let mut in_out_buf = Vec::from(cleartext);
 
-    let ct = match algo {
-        CryptoAlg::AesGcm128 => Aes128Gcm::new(key.into())
-            .encrypt(iv.into(), payload)
-            .map_err(PspError::CryptoError)?,
-        CryptoAlg::AesGcm256 => Aes256Gcm::new(key.into())
-            .encrypt(iv.into(), payload)
-            .map_err(PspError::CryptoError)?,
+    let unbound_key = match algo {
+        CryptoAlg::AesGcm128 => {
+            UnboundKey::new(&AES_128_GCM, key).map_err(|e| PspError::CryptoError(e))?
+        }
+        CryptoAlg::AesGcm256 => {
+            UnboundKey::new(&AES_256_GCM, key).map_err(|e| PspError::CryptoError(e))?
+        }
     };
+    let counter = u64::from_be_bytes(iv[4..12].try_into().unwrap());
+    let nonce_seq = nonce_sequence::Counter64Builder::new()
+        .identifier(<[u8; 4]>::try_from(&iv[..4]).unwrap())
+        .counter(counter)
+        .build();
+    let mut sealing_key = SealingKey::new(unbound_key, nonce_seq);
+    let aad_content = Aad::from(aad);
+    sealing_key
+        .seal_in_place_append_tag(aad_content, &mut in_out_buf)
+        .map_err(|e| PspError::CryptoError(e))?;
 
-    ciphertext.copy_from_slice(&ct);
+    ciphertext.copy_from_slice(&in_out_buf);
 
     Ok(())
 }
@@ -549,36 +545,43 @@ pub fn psp_decrypt(
     ciphertext: &[u8],
     cleartext: &mut [u8],
 ) -> Result<(), PspError> {
-    use aes_gcm::{
-        aead::{Aead, KeyInit, Payload},
-        Aes128Gcm,
-    };
-
-    if ciphertext.is_empty() {
-        return Err(PspError::NoCiphertext);
-    }
-
     debug!("psp_decrypt(): Key: {:02X?}", key);
     debug!("psp_decrypt(): IV:  {:02X?}", iv);
     debug!("psp_decrypt(): AAD: {:02X?}", aad);
     debug!("psp_encrypt(): Ciphertext len: {}", ciphertext.len());
     debug!("psp_encrypt(): Cleartext len:  {}", cleartext.len());
 
-    let payload = Payload {
-        msg: ciphertext,
-        aad,
+    if ciphertext.is_empty() {
+        return Err(PspError::NoCiphertext);
+    }
+
+    let mut in_out_buf = Vec::from(ciphertext);
+
+    let unbound_key = match algo {
+        CryptoAlg::AesGcm128 => {
+            UnboundKey::new(&AES_128_GCM, key).map_err(|e| PspError::CryptoError(e))?
+        }
+        CryptoAlg::AesGcm256 => {
+            UnboundKey::new(&AES_256_GCM, key).map_err(|e| PspError::CryptoError(e))?
+        }
     };
-    let pt = match algo {
-        CryptoAlg::AesGcm128 => Aes128Gcm::new(key.into())
-            .decrypt(iv.into(), payload)
-            .map_err(PspError::CryptoError)?,
-        CryptoAlg::AesGcm256 => Aes256Gcm::new(key.into())
-            .decrypt(iv.into(), payload)
-            .map_err(PspError::CryptoError)?,
-    };
+    let counter = u64::from_be_bytes(iv[4..12].try_into().unwrap());
+    let nonce_seq = nonce_sequence::Counter64Builder::new()
+        .identifier(<[u8; 4]>::try_from(&iv[..4]).unwrap())
+        .counter(counter)
+        .build();
+    let mut opening_key = OpeningKey::new(unbound_key, nonce_seq);
+    let aad_content = Aad::from(aad);
+    opening_key
+        .open_in_place(aad_content, &mut in_out_buf)
+        .map_err(|e| PspError::CryptoError(e))?;
+
     // Not all of the decrypted content needs to be copied. e.g. when an encrypted vc is present.
-    let drop_offset = pt.len() - cleartext.len();
-    cleartext.copy_from_slice(&pt[drop_offset..]);
+    // let drop_offset = pt.len() - cleartext.len();
+    // cleartext.copy_from_slice(&pt[drop_offset..]);
+    let pt_len = in_out_buf.len() - PSP_ICV_SIZE;
+    let drop_offset = pt_len - cleartext.len();
+    cleartext.copy_from_slice(&in_out_buf[drop_offset..ciphertext.len() - PSP_ICV_SIZE]);
 
     Ok(())
 }
