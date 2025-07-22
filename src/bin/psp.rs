@@ -7,7 +7,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File},
     io::BufReader,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::Wrapping,
     path::PathBuf,
     time::Duration,
@@ -239,46 +239,79 @@ struct ServerArgs {
     port: u16,
 }
 
-fn create_ipv4_packet(
-    pkt_buf: &mut [u8],
-    packet_id: u16,
-    empty: bool,
-) -> Result<u16, Box<dyn Error>> {
-    const ETH_HDR_LEN: u16 = 14;
-    const IP_HDR_LEN: u16 = 20;
-    const UDP_HDR_LEN: u16 = 8;
-    const PKT_HDRS_LEN: u16 = ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN;
-    const MIN_PACKET_SIZE: u16 = PKT_HDRS_LEN;
-    const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
+// Common packet constants for IPv4
+const ETH_HDR_LEN_V4: u16 = 14;
+const IP_HDR_LEN_V4: u16 = 20;
+const UDP_HDR_LEN: u16 = 8;
+const PKT_HDRS_LEN_V4: u16 = ETH_HDR_LEN_V4 + IP_HDR_LEN_V4 + UDP_HDR_LEN;
 
+// Common packet constants for IPv6  
+const ETH_HDR_LEN_V6: u16 = 14;
+const IP_HDR_LEN_V6: u16 = 40;
+const PKT_HDRS_LEN_V6: u16 = ETH_HDR_LEN_V6 + IP_HDR_LEN_V6 + UDP_HDR_LEN;
+
+const MIN_PACKET_SIZE_V4: u16 = PKT_HDRS_LEN_V4;
+const MIN_PACKET_SIZE_V6: u16 = PKT_HDRS_LEN_V6;
+const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
+
+/// Common packet validation logic
+fn validate_packet_buffer(pkt_buf: &[u8], min_size: u16) -> Result<u16, Box<dyn Error>> {
     // Validate buffer size
-    if pkt_buf.len() < MIN_PACKET_SIZE as usize {
-        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), MIN_PACKET_SIZE).into());
+    if pkt_buf.len() < min_size as usize {
+        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), min_size).into());
     }
 
-    let mut pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
+    let pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
     
     // Validate packet size
     if pkt_len > MAX_PACKET_SIZE {
         return Err(format!("Packet too large: {} bytes, maximum {}", pkt_len, MAX_PACKET_SIZE).into());
     }
+    
+    Ok(pkt_len)
+}
+
+/// Common UDP setup and payload generation
+fn setup_udp_payload(udp: &mut MutableUdpPacket, payload_len: u16, packet_id: u16) -> Result<(), Box<dyn Error>> {
+    // Test UDP port numbers - not for production use
+    udp.set_source(11111);
+    udp.set_destination(22222);
+    udp.set_length(payload_len + UDP_HDR_LEN);
+
+    let payload = udp.payload_mut();
+    let mut id = Wrapping(u8::try_from(packet_id % 256)?);
+    for offset in 0..payload_len {
+        payload[offset as usize] = id.0;
+        id += 1;
+    }
+    Ok(())
+}
+
+fn create_ipv4_packet(
+    pkt_buf: &mut [u8],
+    packet_id: u16,
+    empty: bool,
+) -> Result<u16, Box<dyn Error>> {
+    let mut pkt_len = validate_packet_buffer(pkt_buf, MIN_PACKET_SIZE_V4)?;
 
     if empty {
-        pkt_len = min(pkt_len, PKT_HDRS_LEN);
+        pkt_len = min(pkt_len, PKT_HDRS_LEN_V4);
     }
-    let payload_len: u16 = pkt_len - PKT_HDRS_LEN;
+    let payload_len: u16 = pkt_len - PKT_HDRS_LEN_V4;
     let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
+    // Test MAC addresses - not for production use
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv4);
 
     let eth_payload = eth.payload_mut();
     let mut ip = MutableIpv4Packet::new(eth_payload).ok_or("Failed to create IPv4 packet - buffer too small")?;
+    // Test IP addresses (private network range 10.0.0.x) - not for production use  
     ip.set_source(Ipv4Addr::new(10, 0, 0, 1));
     ip.set_destination(Ipv4Addr::new(10, 0, 0, 2));
     ip.set_version(4);
     ip.set_header_length(5);
-    ip.set_total_length(pkt_len - ETH_HDR_LEN);
+    ip.set_total_length(pkt_len - ETH_HDR_LEN_V4);
     ip.set_ttl(64);
     ip.set_flags(Ipv4Flags::DontFragment);
     ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
@@ -287,16 +320,7 @@ fn create_ipv4_packet(
 
     let ip_payload = ip.payload_mut();
     let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
-    udp.set_source(11111);
-    udp.set_destination(22222);
-    udp.set_length(payload_len + UDP_HDR_LEN);
-
-    let payload = udp.payload_mut();
-    let mut id = Wrapping(u8::try_from(packet_id % 256)?);
-    for offset in 0..payload_len {
-        payload[offset as usize] = id.0;
-        id += 1;
-    }
+    setup_udp_payload(&mut udp, payload_len, packet_id)?;
     Ok(pkt_len)
 }
 
@@ -305,55 +329,31 @@ fn create_ipv6_packet(
     packet_id: u16,
     empty: bool,
 ) -> Result<u16, Box<dyn Error>> {
-    const ETH_HDR_LEN: u16 = 14;
-    const IP_HDR_LEN: u16 = 40;
-    const UDP_HDR_LEN: u16 = 8;
-    const PKT_HDRS_LEN: u16 = ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN;
-    const MIN_PACKET_SIZE: u16 = PKT_HDRS_LEN;
-    const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
-
-    // Validate buffer size
-    if pkt_buf.len() < MIN_PACKET_SIZE as usize {
-        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), MIN_PACKET_SIZE).into());
-    }
-
-    let mut pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
-    
-    // Validate packet size
-    if pkt_len > MAX_PACKET_SIZE {
-        return Err(format!("Packet too large: {} bytes, maximum {}", pkt_len, MAX_PACKET_SIZE).into());
-    }
+    let mut pkt_len = validate_packet_buffer(pkt_buf, MIN_PACKET_SIZE_V6)?;
 
     if empty {
-        pkt_len = min(pkt_len, PKT_HDRS_LEN);
+        pkt_len = min(pkt_len, PKT_HDRS_LEN_V6);
     }
-    let payload_len: u16 = pkt_len - PKT_HDRS_LEN;
+    let payload_len: u16 = pkt_len - PKT_HDRS_LEN_V6;
     let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
+    // Test MAC addresses - not for production use
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv6);
 
     let eth_payload = eth.payload_mut();
     let mut ip = MutableIpv6Packet::new(eth_payload).ok_or("Failed to create IPv6 packet - buffer too small")?;
-    ip.set_source(Ipv6Addr::new(10, 0, 0, 1, 10, 0, 0, 1));
-    ip.set_destination(Ipv6Addr::new(10, 0, 0, 2, 10, 0, 0, 2));
+    // IPv4-mapped IPv6 addresses for test data (::ffff:10.0.0.1 and ::ffff:10.0.0.2)
+    ip.set_source("::ffff:10.0.0.1".parse().unwrap());
+    ip.set_destination("::ffff:10.0.0.2".parse().unwrap());
     ip.set_version(6);
-    ip.set_payload_length(pkt_len - ETH_HDR_LEN - IP_HDR_LEN);
+    ip.set_payload_length(pkt_len - ETH_HDR_LEN_V6 - IP_HDR_LEN_V6);
     ip.set_hop_limit(64);
     ip.set_next_header(IpNextHeaderProtocols::Udp);
 
     let ip_payload = ip.payload_mut();
     let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
-    udp.set_source(11111);
-    udp.set_destination(22222);
-    udp.set_length(payload_len + UDP_HDR_LEN);
-
-    let payload = udp.payload_mut();
-    let mut id = Wrapping(u8::try_from(packet_id % 256)?);
-    for offset in 0..payload_len {
-        payload[offset as usize] = id.0;
-        id += 1;
-    }
+    setup_udp_payload(&mut udp, payload_len, packet_id)?;
     Ok(pkt_len)
 }
 
