@@ -4,6 +4,8 @@ use std::{
     str::FromStr,
 };
 
+use rand::RngCore;
+
 use aes::Aes256;
 use aws_lc_rs::{aead::{
     nonce_sequence, Aad, BoundKey, OpeningKey, SealingKey, UnboundKey, AES_128_GCM, AES_256_GCM
@@ -168,6 +170,72 @@ pub struct PspConfig {
     pub include_vc: bool,
 }
 
+impl PspConfig {
+    /// Validates the PSP configuration for security and correctness.
+    pub fn validate(&self) -> Result<(), PspError> {
+        // Validate SPI is not reserved value
+        if self.spi == 0 {
+            return Err(PspError::InvalidSpi(self.spi));
+        }
+
+        // Check for weak keys (all zeros)
+        for (i, key) in self.master_keys.iter().enumerate() {
+            if key.iter().all(|&b| b == 0) {
+                return Err(PspError::WeakKey(format!("Master key {} is all zeros", i)));
+            }
+            
+            // Check for other weak patterns (all same byte)
+            let first_byte = key[0];
+            if key.iter().all(|&b| b == first_byte) {
+                return Err(PspError::WeakKey(format!(
+                    "Master key {} uses repeating pattern (0x{:02X})", i, first_byte
+                )));
+            }
+        }
+
+        // Validate crypto offset values are reasonable
+        if self.transport_crypt_off > 64 {
+            return Err(PspError::ConfigError(format!(
+                "Transport crypto offset too large: {}", self.transport_crypt_off
+            )));
+        }
+
+        if self.ipv4_tunnel_crypt_off > 64 {
+            return Err(PspError::ConfigError(format!(
+                "IPv4 tunnel crypto offset too large: {}", self.ipv4_tunnel_crypt_off
+            )));
+        }
+
+        if self.ipv6_tunnel_crypt_off > 64 {
+            return Err(PspError::ConfigError(format!(
+                "IPv6 tunnel crypto offset too large: {}", self.ipv6_tunnel_crypt_off
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Creates a new configuration with secure defaults and validation.
+    pub fn new_secure() -> Result<Self, PspError> {
+        let cfg = PspConfig {
+            master_keys: [
+                PktContext::generate_secure_key(),
+                PktContext::generate_secure_key(),
+            ],
+            spi: PktContext::generate_secure_spi(),
+            psp_encap: PspEncap::Transport,
+            crypto_alg: CryptoAlg::AesGcm256, // Use stronger default
+            transport_crypt_off: 0,
+            ipv4_tunnel_crypt_off: 0,
+            ipv6_tunnel_crypt_off: 0,
+            include_vc: false,
+        };
+
+        cfg.validate()?;
+        Ok(cfg)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PktContext {
     pub psp_cfg: PspConfig,
@@ -177,7 +245,68 @@ pub struct PktContext {
 }
 
 impl PktContext {
+    /// Creates a new PktContext with secure random initialization.
+    /// WARNING: This generates random keys suitable for testing only.
+    /// In production, keys should be loaded from secure key management systems.
     pub fn new() -> PktContext {
+        PktContext {
+            psp_cfg: PspConfig {
+                master_keys: [
+                    Self::generate_secure_key(),
+                    Self::generate_secure_key(),
+                ],
+                spi: Self::generate_secure_spi(),
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            },
+            key: Self::generate_derived_key(16),
+            iv: Self::generate_secure_iv(),
+            vc: 0,
+        }
+    }
+
+    /// Generates a cryptographically secure 32-byte key
+    pub fn generate_secure_key() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        key
+    }
+
+    /// Generates a cryptographically secure derived key of specified length
+    fn generate_derived_key(len: usize) -> Vec<u8> {
+        let mut key = vec![0u8; len];
+        rand::thread_rng().fill_bytes(&mut key);
+        key
+    }
+
+    /// Generates a secure random SPI (avoiding reserved values)
+    pub fn generate_secure_spi() -> u32 {
+        loop {
+            let mut spi_bytes = [0u8; 4];
+            rand::thread_rng().fill_bytes(&mut spi_bytes);
+            let spi = u32::from_be_bytes(spi_bytes);
+            // Ensure SPI is not 0 or 1 (reserved values)
+            if spi > 1 {
+                return spi;
+            }
+        }
+    }
+
+    /// Generates a secure random IV
+    fn generate_secure_iv() -> u64 {
+        let mut iv_bytes = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut iv_bytes);
+        u64::from_be_bytes(iv_bytes)
+    }
+
+    /// Creates a new PktContext for testing with predictable (insecure) values.
+    /// DO NOT USE IN PRODUCTION - This is only for unit tests.
+    #[cfg(test)]
+    pub fn new_for_testing() -> PktContext {
         PktContext {
             psp_cfg: PspConfig {
                 master_keys: [[0; 32], [0; 32]],
@@ -222,6 +351,19 @@ pub enum PspError {
     /// An error occurred when parsing a packet.
     #[error("Packet Parse Error")]
     PacketParseError(#[from] etherparse::ReadError),
+
+    /// Configuration validation errors
+    #[error("Invalid configuration: {0}")]
+    ConfigError(String),
+
+    /// Weak cryptographic key detected
+    #[error("Weak cryptographic key detected: {0}")]
+    WeakKey(String),
+
+    /// Invalid SPI value
+    #[error("Invalid SPI value: {0}")]
+    InvalidSpi(u32),
+
 
     /// An error occurred when writing a packet.
     #[error("Packet Write Error")]
@@ -2166,5 +2308,168 @@ mod tests {
         assert_eq!(orig_pkt, decap_pkt);
 
         Ok(())
+    }
+
+    // Security-focused tests
+    mod security_tests {
+        use super::*;
+
+        #[test]
+        fn test_no_zero_keys_in_new_context() {
+            let ctx = PktContext::new();
+            
+            // Ensure no all-zero keys in secure initialization
+            assert!(
+                !ctx.psp_cfg.master_keys[0].iter().all(|&b| b == 0),
+                "Master key 0 should not be all zeros"
+            );
+            assert!(
+                !ctx.psp_cfg.master_keys[1].iter().all(|&b| b == 0),
+                "Master key 1 should not be all zeros"
+            );
+            
+            // Ensure derived key is not all zeros
+            assert!(
+                !ctx.key.iter().all(|&b| b == 0),
+                "Derived key should not be all zeros"
+            );
+            
+            // Ensure IV is not predictable
+            assert_ne!(ctx.iv, 1, "IV should not be predictable value 1");
+            assert_ne!(ctx.iv, 0, "IV should not be zero");
+        }
+
+        #[test]
+        fn test_secure_spi_generation() {
+            let spi1 = PktContext::generate_secure_spi();
+            let spi2 = PktContext::generate_secure_spi();
+            
+            // SPI should not be reserved values
+            assert_ne!(spi1, 0, "SPI should not be 0");
+            assert_ne!(spi1, 1, "SPI should not be 1");
+            assert_ne!(spi2, 0, "SPI should not be 0");
+            assert_ne!(spi2, 1, "SPI should not be 1");
+            
+            // SPIs should be different (highly likely)
+            assert_ne!(spi1, spi2, "Generated SPIs should be different");
+        }
+
+        #[test]
+        fn test_config_validation_rejects_zero_keys() {
+            let mut cfg = PspConfig::default();
+            
+            // Set keys to all zeros (weak)
+            cfg.master_keys[0] = [0u8; 32];
+            cfg.master_keys[1] = [0u8; 32];
+            cfg.spi = 123; // Valid SPI
+            
+            // Should reject weak keys
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject all-zero keys"
+            );
+        }
+
+        #[test]
+        fn test_config_validation_rejects_repeating_patterns() {
+            let mut cfg = PspConfig::default();
+            
+            // Set keys to repeating patterns (weak)
+            cfg.master_keys[0] = [0xAA; 32];
+            cfg.master_keys[1] = [0x11; 32];
+            cfg.spi = 123; // Valid SPI
+            
+            // Should reject weak patterns
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject repeating key patterns"
+            );
+        }
+
+        #[test]
+        fn test_config_validation_rejects_zero_spi() {
+            let mut cfg = PspConfig::default();
+            
+            // Use secure keys but invalid SPI
+            cfg.master_keys[0] = PktContext::generate_secure_key();
+            cfg.master_keys[1] = PktContext::generate_secure_key();
+            cfg.spi = 0; // Invalid SPI
+            
+            // Should reject zero SPI
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject SPI value of 0"
+            );
+        }
+
+        #[test]
+        fn test_config_validation_rejects_large_crypto_offsets() {
+            let mut cfg = PspConfig::default();
+            
+            // Use secure keys and valid SPI
+            cfg.master_keys[0] = PktContext::generate_secure_key();
+            cfg.master_keys[1] = PktContext::generate_secure_key();
+            cfg.spi = 123;
+            
+            // Test various large offset values
+            cfg.transport_crypt_off = 65; // Too large
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject large transport crypto offset"
+            );
+            
+            cfg.transport_crypt_off = 0; // Reset to valid
+            cfg.ipv4_tunnel_crypt_off = 65; // Too large
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject large IPv4 tunnel crypto offset"
+            );
+            
+            cfg.ipv4_tunnel_crypt_off = 0; // Reset to valid
+            cfg.ipv6_tunnel_crypt_off = 65; // Too large
+            assert!(
+                cfg.validate().is_err(),
+                "Validation should reject large IPv6 tunnel crypto offset"
+            );
+        }
+
+        #[test]
+        fn test_secure_config_passes_validation() {
+            // Create secure config
+            let cfg = PspConfig::new_secure().expect("Should create secure config");
+            
+            // Should pass validation
+            assert!(
+                cfg.validate().is_ok(),
+                "Secure configuration should pass validation"
+            );
+            
+            // Verify it uses stronger defaults
+            assert_eq!(cfg.crypto_alg, CryptoAlg::AesGcm256, "Should default to AES-GCM-256");
+        }
+
+        #[test]
+        fn test_key_uniqueness() {
+            let key1 = PktContext::generate_secure_key();
+            let key2 = PktContext::generate_secure_key();
+            
+            // Keys should be different
+            assert_ne!(key1, key2, "Generated keys should be unique");
+            
+            // No obvious patterns
+            assert!(!key1.iter().all(|&b| b == key1[0]), "Key should not be all same byte");
+            assert!(!key2.iter().all(|&b| b == key2[0]), "Key should not be all same byte");
+        }
+
+        #[test]
+        fn test_testing_context_has_predictable_values() {
+            let ctx = PktContext::new_for_testing();
+            
+            // Testing context should have predictable (insecure) values
+            assert_eq!(ctx.psp_cfg.master_keys[0], [0u8; 32], "Test key 0 should be all zeros");
+            assert_eq!(ctx.psp_cfg.master_keys[1], [0u8; 32], "Test key 1 should be all zeros");
+            assert_eq!(ctx.psp_cfg.spi, 1, "Test SPI should be 1");
+            assert_eq!(ctx.iv, 1, "Test IV should be 1");
+        }
     }
 }

@@ -1,0 +1,23 @@
+{
+  "_WARNING": "This is an EXAMPLE configuration file with placeholder keys",
+  "_SECURITY_NOTICE": "DO NOT USE THESE KEYS IN PRODUCTION - REPLACE WITH REAL CRYPTOGRAPHIC KEYS",
+  "_NOTE": "These keys are intentionally weak and should only be used for testing",
+  
+  "master_keys": [
+    [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ],
+    [
+      17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+      17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17
+    ]
+  ],
+  "spi": 3735928559,
+  "psp_encap": "Transport",
+  "crypto_alg": "AesGcm256",
+  "transport_crypt_off": 0,
+  "ipv4_tunnel_crypt_off": 0,
+  "ipv6_tunnel_crypt_off": 0,
+  "include_vc": false
+}

@@ -55,7 +55,7 @@ enum PspCliCommands {
     /// Performs the following for each packet:
     /// - Adds appropriate PSP encapsulation
     /// - Computes ICV
-    /// - Encryptes data
+    /// - Encrypts data
     ///
     /// Then writes each PSP encrypted packet to a pcap output.
     ///
@@ -244,28 +244,41 @@ fn create_ipv4_packet(
     packet_id: u16,
     empty: bool,
 ) -> Result<u16, Box<dyn Error>> {
-    let eth_hdr_len = 14;
-    let ip_hdr_len = 20;
-    let udp_hdr_len = 8;
-    let pkt_hdrs_len = eth_hdr_len + ip_hdr_len + udp_hdr_len;
+    const ETH_HDR_LEN: u16 = 14;
+    const IP_HDR_LEN: u16 = 20;
+    const UDP_HDR_LEN: u16 = 8;
+    const PKT_HDRS_LEN: u16 = ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN;
+    const MIN_PACKET_SIZE: u16 = PKT_HDRS_LEN;
+    const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
 
-    let mut pkt_len: u16 = pkt_buf.len().try_into()?;
-    if empty {
-        pkt_len = min(pkt_len, pkt_hdrs_len);
+    // Validate buffer size
+    if pkt_buf.len() < MIN_PACKET_SIZE as usize {
+        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), MIN_PACKET_SIZE).into());
     }
-    let payload_len: u16 = pkt_len - pkt_hdrs_len;
-    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Error creating packet")?;
+
+    let mut pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
+    
+    // Validate packet size
+    if pkt_len > MAX_PACKET_SIZE {
+        return Err(format!("Packet too large: {} bytes, maximum {}", pkt_len, MAX_PACKET_SIZE).into());
+    }
+
+    if empty {
+        pkt_len = min(pkt_len, PKT_HDRS_LEN);
+    }
+    let payload_len: u16 = pkt_len - PKT_HDRS_LEN;
+    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv4);
 
     let eth_payload = eth.payload_mut();
-    let mut ip = MutableIpv4Packet::new(eth_payload).ok_or("Error creating packet")?;
+    let mut ip = MutableIpv4Packet::new(eth_payload).ok_or("Failed to create IPv4 packet - buffer too small")?;
     ip.set_source(Ipv4Addr::new(10, 0, 0, 1));
     ip.set_destination(Ipv4Addr::new(10, 0, 0, 2));
     ip.set_version(4);
     ip.set_header_length(5);
-    ip.set_total_length(pkt_len - eth_hdr_len);
+    ip.set_total_length(pkt_len - ETH_HDR_LEN);
     ip.set_ttl(64);
     ip.set_flags(Ipv4Flags::DontFragment);
     ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
@@ -273,10 +286,10 @@ fn create_ipv4_packet(
     ip.set_checksum(csum);
 
     let ip_payload = ip.payload_mut();
-    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Error creating packet")?;
+    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
     udp.set_source(11111);
     udp.set_destination(22222);
-    udp.set_length(payload_len + udp_hdr_len);
+    udp.set_length(payload_len + UDP_HDR_LEN);
 
     let payload = udp.payload_mut();
     let mut id = Wrapping(u8::try_from(packet_id % 256)?);
@@ -292,35 +305,48 @@ fn create_ipv6_packet(
     packet_id: u16,
     empty: bool,
 ) -> Result<u16, Box<dyn Error>> {
-    let eth_hdr_len = 14;
-    let ip_hdr_len = 40;
-    let udp_hdr_len = 8;
-    let pkt_hdrs_len = eth_hdr_len + ip_hdr_len + udp_hdr_len;
+    const ETH_HDR_LEN: u16 = 14;
+    const IP_HDR_LEN: u16 = 40;
+    const UDP_HDR_LEN: u16 = 8;
+    const PKT_HDRS_LEN: u16 = ETH_HDR_LEN + IP_HDR_LEN + UDP_HDR_LEN;
+    const MIN_PACKET_SIZE: u16 = PKT_HDRS_LEN;
+    const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
 
-    let mut pkt_len: u16 = pkt_buf.len().try_into()?;
-    if empty {
-        pkt_len = min(pkt_len, pkt_hdrs_len);
+    // Validate buffer size
+    if pkt_buf.len() < MIN_PACKET_SIZE as usize {
+        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), MIN_PACKET_SIZE).into());
     }
-    let payload_len: u16 = pkt_len - pkt_hdrs_len;
-    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Error creating packet")?;
+
+    let mut pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
+    
+    // Validate packet size
+    if pkt_len > MAX_PACKET_SIZE {
+        return Err(format!("Packet too large: {} bytes, maximum {}", pkt_len, MAX_PACKET_SIZE).into());
+    }
+
+    if empty {
+        pkt_len = min(pkt_len, PKT_HDRS_LEN);
+    }
+    let payload_len: u16 = pkt_len - PKT_HDRS_LEN;
+    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv6);
 
     let eth_payload = eth.payload_mut();
-    let mut ip = MutableIpv6Packet::new(eth_payload).ok_or("Error creating packet")?;
+    let mut ip = MutableIpv6Packet::new(eth_payload).ok_or("Failed to create IPv6 packet - buffer too small")?;
     ip.set_source(Ipv6Addr::new(10, 0, 0, 1, 10, 0, 0, 1));
     ip.set_destination(Ipv6Addr::new(10, 0, 0, 2, 10, 0, 0, 2));
     ip.set_version(6);
-    ip.set_payload_length(pkt_len - eth_hdr_len - ip_hdr_len);
+    ip.set_payload_length(pkt_len - ETH_HDR_LEN - IP_HDR_LEN);
     ip.set_hop_limit(64);
     ip.set_next_header(IpNextHeaderProtocols::Udp);
 
     let ip_payload = ip.payload_mut();
-    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Error creating packet")?;
+    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
     udp.set_source(11111);
     udp.set_destination(22222);
-    udp.set_length(payload_len + udp_hdr_len);
+    udp.set_length(payload_len + UDP_HDR_LEN);
 
     let payload = udp.payload_mut();
     let mut id = Wrapping(u8::try_from(packet_id % 256)?);
@@ -355,7 +381,8 @@ fn create_pcap_file(args: &CreatePcapArgs) -> Result<(), Box<dyn Error>> {
             u32::from(pkt_len),
             &pkt_buf[..pkt_len as usize],
         );
-        pcap_writer.write_packet(&pcap_pkt).unwrap();
+        pcap_writer.write_packet(&pcap_pkt)
+            .map_err(|e| format!("Failed to write packet {}: {}", packet_id, e))?;
     }
     Ok(())
 }
@@ -424,7 +451,12 @@ fn read_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
 fn parse_json_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     let file_in = File::open(cfg_file)?;
     let reader = BufReader::new(file_in);
-    let cfg = serde_json::from_reader(reader)?;
+    let cfg: PspConfig = serde_json::from_reader(reader)?;
+    
+    // Validate configuration for security issues
+    cfg.validate()
+        .map_err(|e| format!("JSON configuration validation failed: {}", e))?;
+    
     Ok(cfg)
 }
 
@@ -472,6 +504,10 @@ fn parse_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     }
 
     debug!("Parsed cfg: {:?}", cfg);
+    
+    // Validate configuration for security issues
+    cfg.validate()
+        .map_err(|e| format!("Configuration validation failed: {}", e))?;
 
     Ok(cfg)
 }
