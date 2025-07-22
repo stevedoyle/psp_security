@@ -72,13 +72,13 @@ impl fmt::Display for PspEncap {
 }
 
 impl FromStr for PspEncap {
-    type Err = String;
+    type Err = PspError;
 
     fn from_str(s: &str) -> Result<PspEncap, Self::Err> {
         match s {
             "transport" => Ok(PspEncap::Transport),
             "tunnel" => Ok(PspEncap::Tunnel),
-            _ => Err("Invalid PspEncap string".to_string()),
+            _ => Err(PspError::InvalidPspEncap(s.to_string())),
         }
     }
 }
@@ -101,13 +101,13 @@ impl fmt::Display for CryptoAlg {
 }
 
 impl FromStr for CryptoAlg {
-    type Err = String;
+    type Err = PspError;
 
     fn from_str(s: &str) -> Result<CryptoAlg, Self::Err> {
         match s {
             "aes-gcm-128" => Ok(CryptoAlg::AesGcm128),
             "aes-gcm-256" => Ok(CryptoAlg::AesGcm256),
-            _ => Err("Invalid crypto algorithm string".to_string()),
+            _ => Err(PspError::InvalidCryptoAlg(s.to_string())),
         }
     }
 }
@@ -158,7 +158,7 @@ pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 type PspDerivedKey = Vec<u8>;
 
 /// A PSP configuration structure.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PspConfig {
     pub master_keys: [PspMasterKey; 2],
     pub spi: u32,
@@ -213,6 +213,25 @@ impl PspConfig {
         }
 
         Ok(())
+    }
+
+    /// Securely clears all cryptographic material from memory.
+    /// This should be called when the configuration is no longer needed
+    /// to prevent keys from remaining in memory.
+    pub fn secure_clear(&mut self) {
+        // Clear master keys with explicit write to prevent optimization
+        for key in &mut self.master_keys {
+            for byte in key.iter_mut() {
+                unsafe {
+                    std::ptr::write_volatile(byte, 0);
+                }
+            }
+        }
+        
+        // Clear SPI (though not as sensitive as keys)
+        unsafe {
+            std::ptr::write_volatile(&mut self.spi, 0);
+        }
     }
 
     /// Creates a new configuration with secure defaults and validation.
@@ -303,6 +322,27 @@ impl PktContext {
         u64::from_be_bytes(iv_bytes)
     }
 
+    /// Securely clears all cryptographic material from memory.
+    /// This should be called when the context is no longer needed
+    /// to prevent keys and sensitive data from remaining in memory.
+    pub fn secure_clear(&mut self) {
+        // Clear the PSP configuration keys
+        self.psp_cfg.secure_clear();
+        
+        // Clear the derived key
+        for byte in &mut self.key {
+            unsafe {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+        
+        // Clear IV and VC (though less sensitive than keys)
+        unsafe {
+            std::ptr::write_volatile(&mut self.iv, 0);
+            std::ptr::write_volatile(&mut self.vc, 0);
+        }
+    }
+
     /// Creates a new PktContext for testing with predictable (insecure) values.
     /// DO NOT USE IN PRODUCTION - This is only for unit tests.
     #[cfg(test)]
@@ -328,6 +368,22 @@ impl PktContext {
 impl Default for PktContext {
     fn default() -> PktContext {
         PktContext::new()
+    }
+}
+
+impl Drop for PktContext {
+    /// Automatically clear cryptographic material when the context is dropped.
+    /// This provides defense-in-depth against keys remaining in memory.
+    fn drop(&mut self) {
+        self.secure_clear();
+    }
+}
+
+impl Drop for PspConfig {
+    /// Automatically clear cryptographic material when the config is dropped.
+    /// This provides defense-in-depth against keys remaining in memory.
+    fn drop(&mut self) {
+        self.secure_clear();
     }
 }
 
@@ -363,6 +419,14 @@ pub enum PspError {
     /// Invalid SPI value
     #[error("Invalid SPI value: {0}")]
     InvalidSpi(u32),
+
+    /// Invalid PSP encapsulation type string
+    #[error("Invalid PSP encapsulation type: {0}")]
+    InvalidPspEncap(String),
+
+    /// Invalid cryptographic algorithm string
+    #[error("Invalid cryptographic algorithm: {0}")]
+    InvalidCryptoAlg(String),
 
 
     /// An error occurred when writing a packet.
@@ -960,7 +1024,7 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
         .set_payload_len(in_ip_payload.len() + psp_udp_encap_len)
-        .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
+        .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
@@ -968,7 +1032,7 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         PSP_UDP_PORT,
         in_ip_payload.len() + psp_encap_len,
     )
-    .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
+    .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
 
     out_udp.write(&mut out_pkt)?;
 
@@ -1142,7 +1206,7 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
         .set_payload_len(psp_payload_len + psp_udp_encap_len)
-        .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
+        .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
@@ -1150,7 +1214,7 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
         PSP_UDP_PORT,
         psp_payload_len + psp_encap_len,
     )
-    .map_err(|err| PspError::PacketEncapError(format!("{err}")))?;
+    .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
 
     out_udp.write(&mut out_pkt)?;
 
@@ -1346,7 +1410,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
         let out_ip_len = parsed_pkt.payload.len() - psp_encap_len;
         out_ip
             .set_payload_len(out_ip_len)
-            .map_err(|err| PspError::PacketDecapError(format!("{err}")))?;
+            .map_err(|err| PspError::PacketDecapError(format!("Failed to decapsulate packet: {}", err)))?;
         out_ip.set_next_headers(in_psp.get_next_hdr());
         out_ip.write(&mut out_pkt)?;
     }
