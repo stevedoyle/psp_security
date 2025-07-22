@@ -142,3 +142,7 @@ git push origin release-v[VERSION]
 ```
 
 The release branch is temporary and can be deleted after the release is complete.
+
+## Memories
+
+- Use the version tag as the GitHub release title when creating a new release
