@@ -843,7 +843,6 @@ dependencies = [
  "clap",
  "clap-num",
  "cmac",
- "crypto-common",
  "derive_builder",
  "env_logger",
  "etherparse",
