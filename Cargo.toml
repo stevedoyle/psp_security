@@ -36,6 +36,7 @@ exitcode = "1.1.2"
 clap-num = "1.0.2"
 pretty-hex = "0.4.1"
 aws-lc-rs = "1.10.0"
+zeroize = { version = "1.8.1", features = ["derive"] }
 
 [dev-dependencies]
 test-log = "0.2.13"

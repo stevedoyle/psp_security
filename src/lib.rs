@@ -22,6 +22,7 @@ use log::debug;
 use pnet_packet::Packet;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 mod packet;
 use packet::psp::PspPacket;
@@ -155,6 +156,20 @@ pub struct PspHeader {
 
 pub type PspMasterKey = [u8; PSP_MASTER_KEY_SIZE];
 
+/// A wrapper for PspMasterKey that implements secure clearing on drop
+#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
+pub struct SecurePspMasterKey(pub PspMasterKey);
+
+impl SecurePspMasterKey {
+    pub fn new(key: PspMasterKey) -> Self {
+        Self(key)
+    }
+    
+    pub fn as_ref(&self) -> &PspMasterKey {
+        &self.0
+    }
+}
+
 type PspDerivedKey = Vec<u8>;
 
 /// A PSP configuration structure.
@@ -219,19 +234,11 @@ impl PspConfig {
     /// This should be called when the configuration is no longer needed
     /// to prevent keys from remaining in memory.
     pub fn secure_clear(&mut self) {
-        // Clear master keys with explicit write to prevent optimization
-        for key in &mut self.master_keys {
-            for byte in key.iter_mut() {
-                unsafe {
-                    std::ptr::write_volatile(byte, 0);
-                }
-            }
-        }
+        // Clear master keys using zeroize for secure memory clearing
+        self.master_keys.zeroize();
         
         // Clear SPI (though not as sensitive as keys)
-        unsafe {
-            std::ptr::write_volatile(&mut self.spi, 0);
-        }
+        self.spi.zeroize();
     }
 
     /// Creates a new configuration with secure defaults and validation.
@@ -329,18 +336,12 @@ impl PktContext {
         // Clear the PSP configuration keys
         self.psp_cfg.secure_clear();
         
-        // Clear the derived key
-        for byte in &mut self.key {
-            unsafe {
-                std::ptr::write_volatile(byte, 0);
-            }
-        }
+        // Clear the derived key using zeroize
+        self.key.zeroize();
         
         // Clear IV and VC (though less sensitive than keys)
-        unsafe {
-            std::ptr::write_volatile(&mut self.iv, 0);
-            std::ptr::write_volatile(&mut self.vc, 0);
-        }
+        self.iv.zeroize();
+        self.vc.zeroize();
     }
 
     /// Creates a new PktContext for testing with predictable (insecure) values.
