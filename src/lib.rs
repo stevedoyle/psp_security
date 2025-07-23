@@ -505,13 +505,9 @@ impl PspSocket {
 
         let mut pkt_ctx = PktContext {
             key: self.options.key.clone(),
-            psp_cfg: PspConfig {
-                spi: self.options.spi,
-                crypto_alg: self.options.algorithm,
-                transport_crypt_off: self.options.crypt_off,
-                ..Default::default()
-            },
-            ..Default::default()
+            psp_cfg: self.options.psp_config.clone(),
+            iv: PktContext::generate_secure_iv(),
+            vc: 0,
         };
 
         let psp_pkt = psp_encap_pdu(&mut pkt_ctx, pkt, 0).map_err(|e| {
@@ -534,13 +530,9 @@ impl PspSocket {
 
         let mut pkt_ctx = PktContext {
             key: self.options.key.clone(),
-            psp_cfg: PspConfig {
-                spi: self.options.spi,
-                crypto_alg: self.options.algorithm,
-                transport_crypt_off: self.options.crypt_off,
-                ..Default::default()
-            },
-            ..Default::default()
+            psp_cfg: self.options.psp_config.clone(),
+            iv: PktContext::generate_secure_iv(),
+            vc: 0,
         };
 
         let decrypted = psp_decap_pdu(&mut pkt_ctx, &buf[..size]).map_err(|e| {
@@ -555,25 +547,42 @@ impl PspSocket {
 }
 
 /// Socket options for a PSP socket.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PspSocketOptions {
-    /// The SPI value for the PSP socket.
-    spi: u32,
+    /// Complete PSP configuration including master keys, SPI, and algorithms
+    psp_config: PspConfig,
     /// The PSP derived key for encrypting packets transmitted and received over the socket.
     key: PspDerivedKey,
-    /// The cryptographic algorithm used for encryption.
-    algorithm: CryptoAlg,
-    /// The offset in the packet where encryption should start.
-    crypt_off: u8,
 }
 
 impl PspSocketOptions {
     pub fn new(spi: u32, key: &PspDerivedKey) -> PspSocketOptions {
-        PspSocketOptions {
+        // Create a minimal config for backward compatibility
+        let psp_config = PspConfig {
+            master_keys: [
+                PktContext::generate_secure_key(),
+                PktContext::generate_secure_key(),
+            ],
             spi,
+            psp_encap: PspEncap::Transport,
+            crypto_alg: CryptoAlg::AesGcm256,
+            transport_crypt_off: 0,
+            ipv4_tunnel_crypt_off: 0,
+            ipv6_tunnel_crypt_off: 0,
+            include_vc: false,
+        };
+        
+        PspSocketOptions {
+            psp_config,
             key: key.clone(),
-            algorithm: CryptoAlg::AesGcm256,
-            crypt_off: 0,
+        }
+    }
+    
+    /// Create socket options from a complete PSP configuration
+    pub fn from_config(psp_config: PspConfig, key: &PspDerivedKey) -> PspSocketOptions {
+        PspSocketOptions {
+            psp_config,
+            key: key.clone(),
         }
     }
 }
@@ -2534,6 +2543,214 @@ mod tests {
             assert_eq!(ctx.psp_cfg.master_keys[1], [0u8; 32], "Test key 1 should be all zeros");
             assert_eq!(ctx.psp_cfg.spi, 1, "Test SPI should be 1");
             assert_eq!(ctx.iv, 1, "Test IV should be 1");
+        }
+    }
+
+    mod socket_tests {
+        use super::*;
+
+        #[test]
+        fn test_psp_socket_options_creation() {
+            // Test new() method (backward compatibility)
+            let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let opts = PspSocketOptions::new(12345, &key);
+            
+            assert_eq!(opts.psp_config.spi, 12345);
+            assert_eq!(opts.key, key);
+            assert_eq!(opts.psp_config.crypto_alg, CryptoAlg::AesGcm256);
+            assert!(matches!(opts.psp_config.psp_encap, PspEncap::Transport));
+            
+            // Master keys should be non-zero (secure random)
+            assert_ne!(opts.psp_config.master_keys[0], [0u8; 32]);
+            assert_ne!(opts.psp_config.master_keys[1], [0u8; 32]);
+        }
+
+        #[test]
+        fn test_psp_socket_options_from_config() {
+            let config = PspConfig {
+                master_keys: [
+                    PktContext::generate_secure_key(),
+                    PktContext::generate_secure_key(),
+                ],
+                spi: 0x12345678,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            };
+            
+            let key = vec![0xAA; 16];
+            let opts = PspSocketOptions::from_config(config.clone(), &key);
+            
+            assert_eq!(opts.psp_config.spi, 0x12345678);
+            assert_eq!(opts.psp_config.crypto_alg, CryptoAlg::AesGcm128);
+            assert_eq!(opts.key, key);
+            assert_eq!(opts.psp_config.master_keys, config.master_keys);
+        }
+
+        #[test] 
+        fn test_psp_socket_bind() {
+            let key = vec![1; 16];
+            let opts = PspSocketOptions::new(12345, &key);
+            
+            // Test binding to any available port
+            let socket = PspSocket::bind("127.0.0.1:0", opts);
+            assert!(socket.is_ok(), "Socket should bind successfully");
+        }
+
+        #[test]
+        fn test_psp_socket_encryption_decryption() {
+            // Create a secure configuration for testing
+            let config = PspConfig {
+                master_keys: [
+                    PktContext::generate_secure_key(),
+                    PktContext::generate_secure_key(),
+                ],
+                spi: 0x11223344,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            };
+
+            // Derive the same key for both sockets
+            let key = derive_psp_key(config.spi, config.crypto_alg, &config.master_keys);
+            
+            let opts1 = PspSocketOptions::from_config(config.clone(), &key);
+            let opts2 = PspSocketOptions::from_config(config, &key);
+            
+            // Create two sockets on different ports
+            let socket1 = PspSocket::bind("127.0.0.1:0", opts1).expect("Socket 1 should bind");
+            let socket2 = PspSocket::bind("127.0.0.1:0", opts2).expect("Socket 2 should bind");
+            
+            // Get the actual bound addresses
+            let addr1 = socket1.udp_sock.as_ref().unwrap().local_addr().unwrap();
+            let addr2 = socket2.udp_sock.as_ref().unwrap().local_addr().unwrap();
+            
+            let message = b"Test message for PSP encryption";
+            
+            // Socket1 sends message to Socket2
+            socket1.send_to(message, addr2).expect("Send should succeed");
+            
+            // Socket2 receives and should decrypt correctly
+            let mut buf = [0u8; 1024];
+            let (len, src) = socket2.recv_from(&mut buf).expect("Receive should succeed");
+            
+            assert_eq!(&buf[..len], message, "Decrypted message should match original");
+            assert_eq!(src, addr1.to_string(), "Source address should match");
+        }
+
+        #[test]
+        fn test_psp_socket_different_keys_fail() {
+            // Create two different configurations
+            let config1 = PspConfig {
+                master_keys: [
+                    PktContext::generate_secure_key(),
+                    PktContext::generate_secure_key(),
+                ],
+                spi: 0x11111111,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            };
+            
+            let config2 = PspConfig {
+                master_keys: [
+                    PktContext::generate_secure_key(),
+                    PktContext::generate_secure_key(),
+                ],
+                spi: 0x22222222,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm128,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            };
+
+            let key1 = derive_psp_key(config1.spi, config1.crypto_alg, &config1.master_keys);
+            let key2 = derive_psp_key(config2.spi, config2.crypto_alg, &config2.master_keys);
+            
+            let opts1 = PspSocketOptions::from_config(config1, &key1);
+            let opts2 = PspSocketOptions::from_config(config2, &key2);
+            
+            let socket1 = PspSocket::bind("127.0.0.1:0", opts1).expect("Socket 1 should bind");
+            let socket2 = PspSocket::bind("127.0.0.1:0", opts2).expect("Socket 2 should bind");
+            
+            let addr2 = socket2.udp_sock.as_ref().unwrap().local_addr().unwrap();
+            
+            let message = b"This should fail to decrypt";
+            
+            // Socket1 sends with different key
+            socket1.send_to(message, addr2).expect("Send should succeed");
+            
+            // Socket2 tries to receive but should fail to decrypt
+            let mut buf = [0u8; 1024];
+            let result = socket2.recv_from(&mut buf);
+            
+            assert!(result.is_err(), "Receive should fail with mismatched keys");
+            assert!(result.unwrap_err().to_string().contains("decapsulating"), 
+                    "Error should mention decapsulation failure");
+        }
+
+        #[test]
+        fn test_psp_socket_multiple_messages() {
+            let config = PspConfig {
+                master_keys: [
+                    PktContext::generate_secure_key(),
+                    PktContext::generate_secure_key(),
+                ],
+                spi: 0xAABBCCDD,
+                psp_encap: PspEncap::Transport,
+                crypto_alg: CryptoAlg::AesGcm256,
+                transport_crypt_off: 0,
+                ipv4_tunnel_crypt_off: 0,
+                ipv6_tunnel_crypt_off: 0,
+                include_vc: false,
+            };
+
+            let key = derive_psp_key(config.spi, config.crypto_alg, &config.master_keys);
+            
+            let opts1 = PspSocketOptions::from_config(config.clone(), &key);
+            let opts2 = PspSocketOptions::from_config(config, &key);
+            
+            let socket1 = PspSocket::bind("127.0.0.1:0", opts1).expect("Socket 1 should bind");
+            let socket2 = PspSocket::bind("127.0.0.1:0", opts2).expect("Socket 2 should bind");
+            
+            let addr1 = socket1.udp_sock.as_ref().unwrap().local_addr().unwrap();
+            let addr2 = socket2.udp_sock.as_ref().unwrap().local_addr().unwrap();
+            
+            let messages = [
+                b"First message".as_slice(),
+                b"Second message with different content".as_slice(),
+                b"Third message".as_slice(),
+            ];
+            
+            // Send multiple messages in both directions
+            for (i, message) in messages.iter().enumerate() {
+                // Socket1 -> Socket2
+                socket1.send_to(message, addr2).expect("Send should succeed");
+                
+                let mut buf = [0u8; 1024];
+                let (len, src) = socket2.recv_from(&mut buf).expect("Receive should succeed");
+                assert_eq!(&buf[..len], *message, "Message {} should match", i);
+                assert_eq!(src, addr1.to_string());
+                
+                // Socket2 -> Socket1 (echo back)
+                socket2.send_to(&buf[..len], addr1).expect("Echo should succeed");
+                
+                let mut echo_buf = [0u8; 1024];
+                let (echo_len, echo_src) = socket1.recv_from(&mut echo_buf).expect("Echo receive should succeed");
+                assert_eq!(&echo_buf[..echo_len], *message, "Echoed message {} should match", i);
+                assert_eq!(echo_src, addr2.to_string());
+            }
         }
     }
 }

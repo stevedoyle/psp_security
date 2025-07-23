@@ -625,7 +625,7 @@ fn client(args: &ClientArgs) -> Result<(), Box<dyn Error>> {
 
     let msg = "Hello, world!";
 
-    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+    let socket_opts = PspSocketOptions::from_config(cfg, &key);
     let socket = PspSocket::bind("0.0.0.0:0", socket_opts).expect("Couldn't bind to address");
 
     // Send the PSP packet to the server
@@ -654,7 +654,7 @@ fn server(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
     debug!("SPI: {:08X}", cfg.spi);
     debug!("Derived Key: {}", key.hex_dump());
 
-    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+    let socket_opts = PspSocketOptions::from_config(cfg, &key);
 
     // Listen on the selected PSP port
     // For each packet received, decrypt the packet and print the payload
