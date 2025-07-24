@@ -930,7 +930,7 @@ pub fn psp_decrypt(
 /// let pkt = [1, 2, 3, 4, 5, 6, 7, 8];
 ///
 /// let mut pkt_ctx = PktContext::default();
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_encap_pdu(&mut pkt_ctx, &pkt, 17)?;
 /// #
 /// #   Ok(())
@@ -1076,7 +1076,7 @@ pub fn psp_encap_pdu(
 ///
 /// let mut pkt_ctx = PktContext::default();
 /// pkt_ctx.psp_cfg.psp_encap = PspEncap::Transport;
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_transport_encap(&mut pkt_ctx, &pkt)?;
 /// #
 /// #   Ok(())
@@ -1252,7 +1252,7 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 ///
 /// let mut pkt_ctx = PktContext::default();
 /// pkt_ctx.psp_cfg.psp_encap = PspEncap::Tunnel;
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &pkt)?;
 /// #
 /// #   Ok(())
@@ -1460,7 +1460,7 @@ pub fn psp_decap_eth(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u8>,
 /// pkt_ctx.psp_cfg.psp_encap = PspEncap::Transport;
 /// let mut decrypt_pkt_ctx = pkt_ctx.clone();
 ///
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_transport_encap(&mut pkt_ctx, &pkt)?;
 /// let decap_pkt = psp_transport_decap(&mut decrypt_pkt_ctx, &encap_pkt)?;
 /// #
@@ -1594,7 +1594,7 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
 /// pkt_ctx.psp_cfg.psp_encap = PspEncap::Tunnel;
 /// let mut decrypt_pkt_ctx = pkt_ctx.clone();
 ///
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_tunnel_encap(&mut pkt_ctx, &pkt)?;
 /// let decap_pkt = psp_tunnel_decap(&mut decrypt_pkt_ctx, &encap_pkt)?;
 /// #
@@ -1721,7 +1721,7 @@ pub fn psp_tunnel_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
 /// let pkt = [1, 2, 3, 4, 5, 6, 7, 8];
 ///
 /// let mut pkt_ctx = PktContext::default();
-/// pkt_ctx.key = derive_psp_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg, &pkt_ctx.psp_cfg.master_keys);
+/// pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(pkt_ctx.psp_cfg.spi, pkt_ctx.psp_cfg.crypto_alg)?;
 /// let encap_pkt = psp_encap_pdu(&mut pkt_ctx, &pkt, 17)?;
 /// let decap_pdu = psp_decap_pdu(&mut pkt_ctx, &encap_pkt)?;
 /// #
