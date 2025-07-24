@@ -30,7 +30,7 @@ use pnet_packet::{
 };
 use pretty_hex::PrettyHex;
 use psp_security::{
-    derive_psp_key, psp_decap_eth, psp_transport_encap, psp_tunnel_encap, CryptoAlg, PktContext,
+    psp_decap_eth, psp_transport_encap, psp_tunnel_encap, CryptoAlg, PktContext,
     PspConfig, PspEncap, PspError, PspMasterKey, PspSocket, PspSocketOptions,
 };
 use rand::{thread_rng, RngCore};
@@ -387,12 +387,6 @@ fn create_pcap_file(args: &CreatePcapArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn key_to_string(key: &[u8]) -> String {
-    key.iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 fn vc_to_string(vc: bool) -> String {
     match vc {
@@ -404,8 +398,14 @@ fn vc_to_string(vc: bool) -> String {
 
 fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
     let mut cfg = PspConfig::default();
-    thread_rng().fill_bytes(&mut cfg.master_keys[0]);
-    thread_rng().fill_bytes(&mut cfg.master_keys[1]);
+    
+    // Generate secure master keys
+    let mut key1 = [0u8; 32];
+    let mut key2 = [0u8; 32];
+    thread_rng().fill_bytes(&mut key1);
+    thread_rng().fill_bytes(&mut key2);
+    cfg.set_master_keys([key1, key2])?;
+    
     cfg.spi = args.spi;
     cfg.transport_crypt_off = args.crypto_offset;
     cfg.ipv4_tunnel_crypt_off = args.crypto_offset;
@@ -421,8 +421,8 @@ fn create_config_file(args: &CreateConfigArgs) -> Result<(), Box<dyn Error>> {
         println!("Created file: {}", path.display());
     } else {
         let mut cfg_parts: Vec<String> = Vec::with_capacity(10);
-        cfg_parts.push(key_to_string(&cfg.master_keys[0]));
-        cfg_parts.push(key_to_string(&cfg.master_keys[1]));
+        cfg_parts.push(cfg.get_master_key_hex(0)?);
+        cfg_parts.push(cfg.get_master_key_hex(1)?);
         cfg_parts.push(format!("{:08X}", cfg.spi));
         cfg_parts.push(format!("{}", cfg.psp_encap));
         cfg_parts.push(format!("{}", cfg.crypto_alg));
@@ -470,10 +470,10 @@ fn parse_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
         .filter(|line| !line.is_empty());
 
     let line = lines.next().unwrap_or("");
-    cfg.master_keys[0] = parse_key(line)?;
+    cfg.set_master_key_from_hex(0, &parse_key_to_hex(line)?)?;
 
     let line = lines.next().unwrap_or("");
-    cfg.master_keys[1] = parse_key(line)?;
+    cfg.set_master_key_from_hex(1, &parse_key_to_hex(line)?)?;
 
     if let Some(line) = lines.next() {
         cfg.spi = parse_spi(line)?;
@@ -519,6 +519,14 @@ fn parse_key(line: &str) -> Result<PspMasterKey, Box<dyn Error>> {
         .try_into()
         .map_err(|_| "Invalid Master Key Length".to_string())?;
     Ok(key)
+}
+
+fn parse_key_to_hex(line: &str) -> Result<String, Box<dyn Error>> {
+    let keystr: String = line.split(' ').collect();
+    if hex::decode(&keystr)?.len() != 32 {
+        return Err("Invalid Master Key Length".into());
+    }
+    Ok(keystr)
 }
 
 fn parse_spi(spi_str: &str) -> Result<u32, Box<dyn Error>> {
@@ -567,11 +575,10 @@ fn encrypt_pcap_file(args: &EncryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    pkt_ctx.key = derive_psp_key(
+    pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(
         pkt_ctx.psp_cfg.spi,
         pkt_ctx.psp_cfg.crypto_alg,
-        &pkt_ctx.psp_cfg.master_keys,
-    );
+    )?;
 
     for in_pkt in pkts {
         let mut out_pkt = encrypt_pkt(&mut pkt_ctx, &in_pkt)?;
@@ -599,11 +606,10 @@ fn decrypt_pcap_file(args: &DecryptArgs) -> Result<(), Box<dyn Error>> {
     let mut pkt_ctx = PktContext::new();
     pkt_ctx.psp_cfg = cfg;
     pkt_ctx.iv = 1;
-    pkt_ctx.key = derive_psp_key(
+    pkt_ctx.key = pkt_ctx.psp_cfg.derive_key(
         pkt_ctx.psp_cfg.spi,
         pkt_ctx.psp_cfg.crypto_alg,
-        &pkt_ctx.psp_cfg.master_keys,
-    );
+    )?;
 
     for in_pkt in pkts {
         let out_pkt = decrypt_pkt(&mut pkt_ctx, &in_pkt)?;
@@ -618,14 +624,14 @@ fn client(args: &ClientArgs) -> Result<(), Box<dyn Error>> {
     println!("{args:?}");
 
     let cfg = read_cfg_file(&args.cfg_file)?;
-    let key = derive_psp_key(cfg.spi, cfg.crypto_alg, &cfg.master_keys);
+    let key = cfg.derive_key(cfg.spi, cfg.crypto_alg)?;
 
     debug!("SPI: {:08X}", cfg.spi);
     debug!("Derived Key: {}", key.hex_dump());
 
     let msg = "Hello, world!";
 
-    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+    let socket_opts = PspSocketOptions::from_config(cfg, &key);
     let socket = PspSocket::bind("0.0.0.0:0", socket_opts).expect("Couldn't bind to address");
 
     // Send the PSP packet to the server
@@ -649,12 +655,12 @@ fn server(args: &ServerArgs) -> Result<(), Box<dyn Error>> {
     println!("{args:?}");
 
     let cfg = read_cfg_file(&args.cfg_file)?;
-    let key = derive_psp_key(cfg.spi, cfg.crypto_alg, &cfg.master_keys);
+    let key = cfg.derive_key(cfg.spi, cfg.crypto_alg)?;
 
     debug!("SPI: {:08X}", cfg.spi);
     debug!("Derived Key: {}", key.hex_dump());
 
-    let socket_opts = PspSocketOptions::new(cfg.spi, &key);
+    let socket_opts = PspSocketOptions::from_config(cfg, &key);
 
     // Listen on the selected PSP port
     // For each packet received, decrypt the packet and print the payload
