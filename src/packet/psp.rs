@@ -1,7 +1,6 @@
 use pnet_macros::packet;
 use pnet_macros_support::types::{u1, u2, u32be, u4, u6, u64be};
 
-
 /// Represents a PSP Packet.
 ///
 /// PSP Security Payload (PSP) Header

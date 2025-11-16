@@ -245,7 +245,7 @@ const IP_HDR_LEN_V4: u16 = 20;
 const UDP_HDR_LEN: u16 = 8;
 const PKT_HDRS_LEN_V4: u16 = ETH_HDR_LEN_V4 + IP_HDR_LEN_V4 + UDP_HDR_LEN;
 
-// Common packet constants for IPv6  
+// Common packet constants for IPv6
 const ETH_HDR_LEN_V6: u16 = 14;
 const IP_HDR_LEN_V6: u16 = 40;
 const PKT_HDRS_LEN_V6: u16 = ETH_HDR_LEN_V6 + IP_HDR_LEN_V6 + UDP_HDR_LEN;
@@ -258,21 +258,37 @@ const MAX_PACKET_SIZE: u16 = 9000; // Jumbo frame limit
 fn validate_packet_buffer(pkt_buf: &[u8], min_size: u16) -> Result<u16, Box<dyn Error>> {
     // Validate buffer size
     if pkt_buf.len() < min_size as usize {
-        return Err(format!("Buffer too small: {} bytes, minimum {}", pkt_buf.len(), min_size).into());
+        return Err(format!(
+            "Buffer too small: {} bytes, minimum {}",
+            pkt_buf.len(),
+            min_size
+        )
+        .into());
     }
 
-    let pkt_len: u16 = pkt_buf.len().try_into().map_err(|_| "Packet buffer too large")?;
-    
+    let pkt_len: u16 = pkt_buf
+        .len()
+        .try_into()
+        .map_err(|_| "Packet buffer too large")?;
+
     // Validate packet size
     if pkt_len > MAX_PACKET_SIZE {
-        return Err(format!("Packet too large: {} bytes, maximum {}", pkt_len, MAX_PACKET_SIZE).into());
+        return Err(format!(
+            "Packet too large: {} bytes, maximum {}",
+            pkt_len, MAX_PACKET_SIZE
+        )
+        .into());
     }
-    
+
     Ok(pkt_len)
 }
 
 /// Common UDP setup and payload generation
-fn setup_udp_payload(udp: &mut MutableUdpPacket, payload_len: u16, packet_id: u16) -> Result<(), Box<dyn Error>> {
+fn setup_udp_payload(
+    udp: &mut MutableUdpPacket,
+    payload_len: u16,
+    packet_id: u16,
+) -> Result<(), Box<dyn Error>> {
     // Test UDP port numbers - not for production use
     udp.set_source(11111);
     udp.set_destination(22222);
@@ -298,15 +314,17 @@ fn create_ipv4_packet(
         pkt_len = min(pkt_len, PKT_HDRS_LEN_V4);
     }
     let payload_len: u16 = pkt_len - PKT_HDRS_LEN_V4;
-    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
+    let mut eth = MutableEthernetPacket::new(pkt_buf)
+        .ok_or("Failed to create Ethernet packet - buffer too small")?;
     // Test MAC addresses - not for production use
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv4);
 
     let eth_payload = eth.payload_mut();
-    let mut ip = MutableIpv4Packet::new(eth_payload).ok_or("Failed to create IPv4 packet - buffer too small")?;
-    // Test IP addresses (private network range 10.0.0.x) - not for production use  
+    let mut ip = MutableIpv4Packet::new(eth_payload)
+        .ok_or("Failed to create IPv4 packet - buffer too small")?;
+    // Test IP addresses (private network range 10.0.0.x) - not for production use
     ip.set_source(Ipv4Addr::new(10, 0, 0, 1));
     ip.set_destination(Ipv4Addr::new(10, 0, 0, 2));
     ip.set_version(4);
@@ -319,7 +337,8 @@ fn create_ipv4_packet(
     ip.set_checksum(csum);
 
     let ip_payload = ip.payload_mut();
-    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
+    let mut udp = MutableUdpPacket::new(ip_payload)
+        .ok_or("Failed to create UDP packet - buffer too small")?;
     setup_udp_payload(&mut udp, payload_len, packet_id)?;
     Ok(pkt_len)
 }
@@ -335,14 +354,16 @@ fn create_ipv6_packet(
         pkt_len = min(pkt_len, PKT_HDRS_LEN_V6);
     }
     let payload_len: u16 = pkt_len - PKT_HDRS_LEN_V6;
-    let mut eth = MutableEthernetPacket::new(pkt_buf).ok_or("Failed to create Ethernet packet - buffer too small")?;
+    let mut eth = MutableEthernetPacket::new(pkt_buf)
+        .ok_or("Failed to create Ethernet packet - buffer too small")?;
     // Test MAC addresses - not for production use
     eth.set_source(MacAddr::new(0x00, 0x22, 0x33, 0x44, 0x55, 0x00));
     eth.set_destination(MacAddr::new(0x00, 0x88, 0x99, 0xAA, 0xBB, 0x00));
     eth.set_ethertype(EtherTypes::Ipv6);
 
     let eth_payload = eth.payload_mut();
-    let mut ip = MutableIpv6Packet::new(eth_payload).ok_or("Failed to create IPv6 packet - buffer too small")?;
+    let mut ip = MutableIpv6Packet::new(eth_payload)
+        .ok_or("Failed to create IPv6 packet - buffer too small")?;
     // IPv4-mapped IPv6 addresses for test data (::ffff:10.0.0.1 and ::ffff:10.0.0.2)
     ip.set_source("::ffff:10.0.0.1".parse().unwrap());
     ip.set_destination("::ffff:10.0.0.2".parse().unwrap());
@@ -352,7 +373,8 @@ fn create_ipv6_packet(
     ip.set_next_header(IpNextHeaderProtocols::Udp);
 
     let ip_payload = ip.payload_mut();
-    let mut udp = MutableUdpPacket::new(ip_payload).ok_or("Failed to create UDP packet - buffer too small")?;
+    let mut udp = MutableUdpPacket::new(ip_payload)
+        .ok_or("Failed to create UDP packet - buffer too small")?;
     setup_udp_payload(&mut udp, payload_len, packet_id)?;
     Ok(pkt_len)
 }
@@ -381,7 +403,8 @@ fn create_pcap_file(args: &CreatePcapArgs) -> Result<(), Box<dyn Error>> {
             u32::from(pkt_len),
             &pkt_buf[..pkt_len as usize],
         );
-        pcap_writer.write_packet(&pcap_pkt)
+        pcap_writer
+            .write_packet(&pcap_pkt)
             .map_err(|e| format!("Failed to write packet {}: {}", packet_id, e))?;
     }
     Ok(())
@@ -452,11 +475,11 @@ fn parse_json_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     let file_in = File::open(cfg_file)?;
     let reader = BufReader::new(file_in);
     let cfg: PspConfig = serde_json::from_reader(reader)?;
-    
+
     // Validate configuration for security issues
     cfg.validate()
         .map_err(|e| format!("JSON configuration validation failed: {}", e))?;
-    
+
     Ok(cfg)
 }
 
@@ -504,7 +527,7 @@ fn parse_cfg_file(cfg_file: &str) -> Result<PspConfig, Box<dyn Error>> {
     }
 
     debug!("Parsed cfg: {:?}", cfg);
-    
+
     // Validate configuration for security issues
     cfg.validate()
         .map_err(|e| format!("Configuration validation failed: {}", e))?;

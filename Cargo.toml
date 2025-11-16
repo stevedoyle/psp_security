@@ -39,3 +39,6 @@ aws-lc-rs = "1.10.0"
 
 [dev-dependencies]
 test-log = "0.2.13"
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.8"

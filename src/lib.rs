@@ -7,9 +7,12 @@ use std::{
 use rand::RngCore;
 
 use aes::Aes256;
-use aws_lc_rs::{aead::{
-    nonce_sequence, Aad, BoundKey, OpeningKey, SealingKey, UnboundKey, AES_128_GCM, AES_256_GCM
-}, error};
+use aws_lc_rs::{
+    aead::{
+        nonce_sequence, Aad, BoundKey, OpeningKey, SealingKey, UnboundKey, AES_128_GCM, AES_256_GCM,
+    },
+    error,
+};
 use bincode::Options;
 use bitfield::bitfield;
 use clap::ValueEnum;
@@ -183,12 +186,13 @@ impl PspConfig {
             if key.iter().all(|&b| b == 0) {
                 return Err(PspError::WeakKey(format!("Master key {} is all zeros", i)));
             }
-            
+
             // Check for other weak patterns (all same byte)
             let first_byte = key[0];
             if key.iter().all(|&b| b == first_byte) {
                 return Err(PspError::WeakKey(format!(
-                    "Master key {} uses repeating pattern (0x{:02X})", i, first_byte
+                    "Master key {} uses repeating pattern (0x{:02X})",
+                    i, first_byte
                 )));
             }
         }
@@ -196,19 +200,22 @@ impl PspConfig {
         // Validate crypto offset values are reasonable
         if self.transport_crypt_off > 64 {
             return Err(PspError::ConfigError(format!(
-                "Transport crypto offset too large: {}", self.transport_crypt_off
+                "Transport crypto offset too large: {}",
+                self.transport_crypt_off
             )));
         }
 
         if self.ipv4_tunnel_crypt_off > 64 {
             return Err(PspError::ConfigError(format!(
-                "IPv4 tunnel crypto offset too large: {}", self.ipv4_tunnel_crypt_off
+                "IPv4 tunnel crypto offset too large: {}",
+                self.ipv4_tunnel_crypt_off
             )));
         }
 
         if self.ipv6_tunnel_crypt_off > 64 {
             return Err(PspError::ConfigError(format!(
-                "IPv6 tunnel crypto offset too large: {}", self.ipv6_tunnel_crypt_off
+                "IPv6 tunnel crypto offset too large: {}",
+                self.ipv6_tunnel_crypt_off
             )));
         }
 
@@ -227,7 +234,7 @@ impl PspConfig {
                 }
             }
         }
-        
+
         // Clear SPI (though not as sensitive as keys)
         unsafe {
             std::ptr::write_volatile(&mut self.spi, 0);
@@ -270,10 +277,7 @@ impl PktContext {
     pub fn new() -> PktContext {
         PktContext {
             psp_cfg: PspConfig {
-                master_keys: [
-                    Self::generate_secure_key(),
-                    Self::generate_secure_key(),
-                ],
+                master_keys: [Self::generate_secure_key(), Self::generate_secure_key()],
                 spi: Self::generate_secure_spi(),
                 psp_encap: PspEncap::Transport,
                 crypto_alg: CryptoAlg::AesGcm128,
@@ -328,14 +332,14 @@ impl PktContext {
     pub fn secure_clear(&mut self) {
         // Clear the PSP configuration keys
         self.psp_cfg.secure_clear();
-        
+
         // Clear the derived key
         for byte in &mut self.key {
             unsafe {
                 std::ptr::write_volatile(byte, 0);
             }
         }
-        
+
         // Clear IV and VC (though less sensitive than keys)
         unsafe {
             std::ptr::write_volatile(&mut self.iv, 0);
@@ -427,7 +431,6 @@ pub enum PspError {
     /// Invalid cryptographic algorithm string
     #[error("Invalid cryptographic algorithm: {0}")]
     InvalidCryptoAlg(String),
-
 
     /// An error occurred when writing a packet.
     #[error("Packet Write Error")]
@@ -1024,7 +1027,9 @@ pub fn psp_transport_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
         .set_payload_len(in_ip_payload.len() + psp_udp_encap_len)
-        .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
+        .map_err(|err| {
+            PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err))
+        })?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
@@ -1206,7 +1211,9 @@ pub fn psp_tunnel_encap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Vec<u
     out_ip.set_next_headers(ip_number::UDP);
     out_ip
         .set_payload_len(psp_payload_len + psp_udp_encap_len)
-        .map_err(|err| PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err)))?;
+        .map_err(|err| {
+            PspError::PacketEncapError(format!("Failed to encapsulate packet: {}", err))
+        })?;
     out_ip.write(&mut out_pkt)?;
 
     let out_udp = UdpHeader::without_ipv4_checksum(
@@ -1408,9 +1415,9 @@ pub fn psp_transport_decap(pkt_ctx: &mut PktContext, in_pkt: &[u8]) -> Result<Ve
     if let Some(ip) = parsed_pkt.ip {
         let mut out_ip = ip;
         let out_ip_len = parsed_pkt.payload.len() - psp_encap_len;
-        out_ip
-            .set_payload_len(out_ip_len)
-            .map_err(|err| PspError::PacketDecapError(format!("Failed to decapsulate packet: {}", err)))?;
+        out_ip.set_payload_len(out_ip_len).map_err(|err| {
+            PspError::PacketDecapError(format!("Failed to decapsulate packet: {}", err))
+        })?;
         out_ip.set_next_headers(in_psp.get_next_hdr());
         out_ip.write(&mut out_pkt)?;
     }
@@ -2381,7 +2388,7 @@ mod tests {
         #[test]
         fn test_no_zero_keys_in_new_context() {
             let ctx = PktContext::new();
-            
+
             // Ensure no all-zero keys in secure initialization
             assert!(
                 !ctx.psp_cfg.master_keys[0].iter().all(|&b| b == 0),
@@ -2391,13 +2398,13 @@ mod tests {
                 !ctx.psp_cfg.master_keys[1].iter().all(|&b| b == 0),
                 "Master key 1 should not be all zeros"
             );
-            
+
             // Ensure derived key is not all zeros
             assert!(
                 !ctx.key.iter().all(|&b| b == 0),
                 "Derived key should not be all zeros"
             );
-            
+
             // Ensure IV is not predictable
             assert_ne!(ctx.iv, 1, "IV should not be predictable value 1");
             assert_ne!(ctx.iv, 0, "IV should not be zero");
@@ -2407,13 +2414,13 @@ mod tests {
         fn test_secure_spi_generation() {
             let spi1 = PktContext::generate_secure_spi();
             let spi2 = PktContext::generate_secure_spi();
-            
+
             // SPI should not be reserved values
             assert_ne!(spi1, 0, "SPI should not be 0");
             assert_ne!(spi1, 1, "SPI should not be 1");
             assert_ne!(spi2, 0, "SPI should not be 0");
             assert_ne!(spi2, 1, "SPI should not be 1");
-            
+
             // SPIs should be different (highly likely)
             assert_ne!(spi1, spi2, "Generated SPIs should be different");
         }
@@ -2421,12 +2428,12 @@ mod tests {
         #[test]
         fn test_config_validation_rejects_zero_keys() {
             let mut cfg = PspConfig::default();
-            
+
             // Set keys to all zeros (weak)
             cfg.master_keys[0] = [0u8; 32];
             cfg.master_keys[1] = [0u8; 32];
             cfg.spi = 123; // Valid SPI
-            
+
             // Should reject weak keys
             assert!(
                 cfg.validate().is_err(),
@@ -2437,12 +2444,12 @@ mod tests {
         #[test]
         fn test_config_validation_rejects_repeating_patterns() {
             let mut cfg = PspConfig::default();
-            
+
             // Set keys to repeating patterns (weak)
             cfg.master_keys[0] = [0xAA; 32];
             cfg.master_keys[1] = [0x11; 32];
             cfg.spi = 123; // Valid SPI
-            
+
             // Should reject weak patterns
             assert!(
                 cfg.validate().is_err(),
@@ -2453,12 +2460,12 @@ mod tests {
         #[test]
         fn test_config_validation_rejects_zero_spi() {
             let mut cfg = PspConfig::default();
-            
+
             // Use secure keys but invalid SPI
             cfg.master_keys[0] = PktContext::generate_secure_key();
             cfg.master_keys[1] = PktContext::generate_secure_key();
             cfg.spi = 0; // Invalid SPI
-            
+
             // Should reject zero SPI
             assert!(
                 cfg.validate().is_err(),
@@ -2469,26 +2476,26 @@ mod tests {
         #[test]
         fn test_config_validation_rejects_large_crypto_offsets() {
             let mut cfg = PspConfig::default();
-            
+
             // Use secure keys and valid SPI
             cfg.master_keys[0] = PktContext::generate_secure_key();
             cfg.master_keys[1] = PktContext::generate_secure_key();
             cfg.spi = 123;
-            
+
             // Test various large offset values
             cfg.transport_crypt_off = 65; // Too large
             assert!(
                 cfg.validate().is_err(),
                 "Validation should reject large transport crypto offset"
             );
-            
+
             cfg.transport_crypt_off = 0; // Reset to valid
             cfg.ipv4_tunnel_crypt_off = 65; // Too large
             assert!(
                 cfg.validate().is_err(),
                 "Validation should reject large IPv4 tunnel crypto offset"
             );
-            
+
             cfg.ipv4_tunnel_crypt_off = 0; // Reset to valid
             cfg.ipv6_tunnel_crypt_off = 65; // Too large
             assert!(
@@ -2501,39 +2508,264 @@ mod tests {
         fn test_secure_config_passes_validation() {
             // Create secure config
             let cfg = PspConfig::new_secure().expect("Should create secure config");
-            
+
             // Should pass validation
             assert!(
                 cfg.validate().is_ok(),
                 "Secure configuration should pass validation"
             );
-            
+
             // Verify it uses stronger defaults
-            assert_eq!(cfg.crypto_alg, CryptoAlg::AesGcm256, "Should default to AES-GCM-256");
+            assert_eq!(
+                cfg.crypto_alg,
+                CryptoAlg::AesGcm256,
+                "Should default to AES-GCM-256"
+            );
         }
 
         #[test]
         fn test_key_uniqueness() {
             let key1 = PktContext::generate_secure_key();
             let key2 = PktContext::generate_secure_key();
-            
+
             // Keys should be different
             assert_ne!(key1, key2, "Generated keys should be unique");
-            
+
             // No obvious patterns
-            assert!(!key1.iter().all(|&b| b == key1[0]), "Key should not be all same byte");
-            assert!(!key2.iter().all(|&b| b == key2[0]), "Key should not be all same byte");
+            assert!(
+                !key1.iter().all(|&b| b == key1[0]),
+                "Key should not be all same byte"
+            );
+            assert!(
+                !key2.iter().all(|&b| b == key2[0]),
+                "Key should not be all same byte"
+            );
         }
 
         #[test]
         fn test_testing_context_has_predictable_values() {
             let ctx = PktContext::new_for_testing();
-            
+
             // Testing context should have predictable (insecure) values
-            assert_eq!(ctx.psp_cfg.master_keys[0], [0u8; 32], "Test key 0 should be all zeros");
-            assert_eq!(ctx.psp_cfg.master_keys[1], [0u8; 32], "Test key 1 should be all zeros");
+            assert_eq!(
+                ctx.psp_cfg.master_keys[0], [0u8; 32],
+                "Test key 0 should be all zeros"
+            );
+            assert_eq!(
+                ctx.psp_cfg.master_keys[1], [0u8; 32],
+                "Test key 1 should be all zeros"
+            );
             assert_eq!(ctx.psp_cfg.spi, 1, "Test SPI should be 1");
             assert_eq!(ctx.iv, 1, "Test IV should be 1");
+        }
+    }
+
+    // Error handling tests
+    mod error_handling_tests {
+        use super::*;
+
+        #[test]
+        fn test_decrypt_with_wrong_key() {
+            let algo = CryptoAlg::AesGcm128;
+            let key1: [u8; 16] = [1; 16];
+            let key2: [u8; 16] = [2; 16]; // Different key
+            let iv: [u8; 12] = [0; 12];
+            let aad = [0u8; 4];
+            let plaintext = b"Test data for authentication failure";
+
+            // Encrypt with key1
+            let mut ciphertext = vec![0u8; plaintext.len() + PSP_ICV_SIZE];
+            psp_encrypt(algo, &key1, &iv, &aad, plaintext, &mut ciphertext)
+                .expect("Encryption should succeed");
+
+            // Try to decrypt with key2 (wrong key) - should fail
+            let mut decrypted = vec![0u8; plaintext.len()];
+            let result = psp_decrypt(algo, &key2, &iv, &aad, &ciphertext, &mut decrypted);
+            assert!(result.is_err(), "Decryption with wrong key should fail");
+        }
+
+        #[test]
+        fn test_decrypt_corrupted_data() {
+            let algo = CryptoAlg::AesGcm128;
+            let key: [u8; 16] = [1; 16];
+            let iv: [u8; 12] = [0; 12];
+            let aad = [0u8; 4];
+            let plaintext = b"Test data for corruption test";
+
+            let mut ciphertext = vec![0u8; plaintext.len() + PSP_ICV_SIZE];
+            psp_encrypt(algo, &key, &iv, &aad, plaintext, &mut ciphertext)
+                .expect("Encryption should succeed");
+
+            // Corrupt the ciphertext by flipping a bit
+            if !ciphertext.is_empty() {
+                ciphertext[0] ^= 0x01;
+            }
+
+            // Decryption should fail due to ICV mismatch
+            let mut decrypted = vec![0u8; plaintext.len()];
+            let result = psp_decrypt(algo, &key, &iv, &aad, &ciphertext, &mut decrypted);
+            assert!(result.is_err(), "Decryption of corrupted data should fail");
+        }
+
+        #[test]
+        fn test_decrypt_truncated_data() {
+            let algo = CryptoAlg::AesGcm128;
+            let key: [u8; 16] = [1; 16];
+            let iv: [u8; 12] = [0; 12];
+            let aad = [0u8; 4];
+            let plaintext = b"Test data for truncation test";
+
+            let mut ciphertext = vec![0u8; plaintext.len() + PSP_ICV_SIZE];
+            psp_encrypt(algo, &key, &iv, &aad, plaintext, &mut ciphertext)
+                .expect("Encryption should succeed");
+
+            // Truncate the ciphertext
+            let truncated = &ciphertext[..ciphertext.len().saturating_sub(5)];
+
+            // Decryption should fail
+            let mut decrypted = vec![0u8; plaintext.len()];
+            let result = psp_decrypt(algo, &key, &iv, &aad, truncated, &mut decrypted);
+            assert!(result.is_err(), "Decryption of truncated data should fail");
+        }
+
+        #[test]
+        fn test_decrypt_empty_ciphertext() {
+            let algo = CryptoAlg::AesGcm128;
+            let key: [u8; 16] = [1; 16];
+            let iv: [u8; 12] = [0; 12];
+            let aad = [0u8; 4];
+            let mut decrypted = vec![0u8; 16];
+
+            // Try to decrypt empty data
+            let result = psp_decrypt(algo, &key, &iv, &aad, &[], &mut decrypted);
+            assert!(result.is_err(), "Decryption of empty data should fail");
+        }
+
+        #[test]
+        fn test_transport_decap_with_invalid_packet() {
+            let mut ctx = PktContext::new_for_testing();
+
+            // Create a malformed packet (too short to be valid)
+            let invalid_pkt = vec![0u8; 20];
+
+            let result = psp_transport_decap(&mut ctx, &invalid_pkt);
+            assert!(
+                result.is_err(),
+                "Decapsulation of invalid packet should fail"
+            );
+        }
+
+        #[test]
+        fn test_tunnel_decap_with_invalid_packet() {
+            let mut ctx = PktContext::new_for_testing();
+
+            // Create a malformed packet (too short to be valid)
+            let invalid_pkt = vec![0u8; 20];
+
+            let result = psp_tunnel_decap(&mut ctx, &invalid_pkt);
+            assert!(
+                result.is_err(),
+                "Decapsulation of invalid packet should fail"
+            );
+        }
+
+        #[test]
+        fn test_transport_encap_decap_authentication_failure() {
+            let mut ctx_encap = get_pkt_ctx(PspVersion::PspVer0);
+            let mut ctx_decap = get_pkt_ctx(PspVersion::PspVer0);
+
+            // Use different SPIs for encap and decap
+            ctx_encap.psp_cfg.spi = 0x12345678;
+            ctx_decap.psp_cfg.spi = 0x87654321;
+
+            ctx_encap.key = derive_psp_key(
+                ctx_encap.psp_cfg.spi,
+                ctx_encap.psp_cfg.crypto_alg,
+                &ctx_encap.psp_cfg.master_keys,
+            );
+            ctx_decap.key = derive_psp_key(
+                ctx_decap.psp_cfg.spi,
+                ctx_decap.psp_cfg.crypto_alg,
+                &ctx_decap.psp_cfg.master_keys,
+            );
+
+            let orig_pkt = get_ipv4_test_pkt();
+
+            // Encapsulate with one key
+            let encap_pkt = psp_transport_encap(&mut ctx_encap, &orig_pkt)
+                .expect("Encapsulation should succeed");
+
+            // Try to decapsulate with different key - should fail
+            let result = psp_transport_decap(&mut ctx_decap, &encap_pkt);
+            assert!(
+                result.is_err(),
+                "Decapsulation with wrong key should fail due to authentication"
+            );
+        }
+
+        #[test]
+        fn test_tunnel_encap_decap_authentication_failure() {
+            let mut ctx_encap = get_pkt_ctx(PspVersion::PspVer0);
+            let mut ctx_decap = get_pkt_ctx(PspVersion::PspVer0);
+
+            // Use different SPIs for encap and decap
+            ctx_encap.psp_cfg.spi = 0x12345678;
+            ctx_decap.psp_cfg.spi = 0x87654321;
+
+            ctx_encap.key = derive_psp_key(
+                ctx_encap.psp_cfg.spi,
+                ctx_encap.psp_cfg.crypto_alg,
+                &ctx_encap.psp_cfg.master_keys,
+            );
+            ctx_decap.key = derive_psp_key(
+                ctx_decap.psp_cfg.spi,
+                ctx_decap.psp_cfg.crypto_alg,
+                &ctx_decap.psp_cfg.master_keys,
+            );
+
+            let orig_pkt = get_ipv4_test_pkt();
+
+            // Encapsulate with one key
+            let encap_pkt =
+                psp_tunnel_encap(&mut ctx_encap, &orig_pkt).expect("Encapsulation should succeed");
+
+            // Try to decapsulate with different key - should fail
+            let result = psp_tunnel_decap(&mut ctx_decap, &encap_pkt);
+            assert!(
+                result.is_err(),
+                "Decapsulation with wrong key should fail due to authentication"
+            );
+        }
+
+        #[test]
+        fn test_psp_version_invalid() {
+            // Test invalid PSP version
+            let result = PspVersion::try_from(255);
+            assert!(result.is_err(), "Invalid PSP version should return error");
+        }
+
+        #[test]
+        fn test_decrypt_with_corrupted_icv() {
+            let algo = CryptoAlg::AesGcm128;
+            let key: [u8; 16] = [1; 16];
+            let iv: [u8; 12] = [0; 12];
+            let aad = [0u8; 4];
+            let plaintext = b"Test data with ICV corruption";
+
+            let mut ciphertext = vec![0u8; plaintext.len() + PSP_ICV_SIZE];
+            psp_encrypt(algo, &key, &iv, &aad, plaintext, &mut ciphertext)
+                .expect("Encryption should succeed");
+
+            // Corrupt the ICV (last 16 bytes)
+            let len = ciphertext.len();
+            if len >= 16 {
+                ciphertext[len - 1] ^= 0xFF;
+            }
+
+            // Decryption should fail
+            let mut decrypted = vec![0u8; plaintext.len()];
+            let result = psp_decrypt(algo, &key, &iv, &aad, &ciphertext, &mut decrypted);
+            assert!(result.is_err(), "Decryption with corrupted ICV should fail");
         }
     }
 }
