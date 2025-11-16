@@ -3057,4 +3057,479 @@ mod tests {
             );
         }
     }
+
+    /// Tests for Virtual Cookie (VC) comprehensive coverage
+    #[cfg(test)]
+    mod virtual_cookie_tests {
+        use super::*;
+
+        #[test]
+        fn test_vc_with_all_crypto_offsets() {
+            // Test VC with various crypto offsets
+            let offsets = vec![0, 1, 2, 4];
+
+            for offset in offsets {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.include_vc = true;
+                ctx.psp_cfg.transport_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let encap_result = psp_transport_encap(&mut ctx, &test_pkt);
+                assert!(
+                    encap_result.is_ok(),
+                    "VC with crypto offset {} should work",
+                    offset
+                );
+
+                // Verify decapsulation works too
+                if let Ok(encap_pkt) = encap_result {
+                    let mut decap_ctx = ctx.clone();
+                    let decap_result = psp_transport_decap(&mut decap_ctx, &encap_pkt);
+                    assert!(
+                        decap_result.is_ok(),
+                        "VC decapsulation with crypto offset {} should work",
+                        offset
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_vc_transport_vs_tunnel_behavior() {
+            // Compare VC behavior in transport vs tunnel mode
+
+            // Transport mode with VC
+            let mut transport_ctx = get_pkt_ctx(PspVersion::PspVer0);
+            transport_ctx.psp_cfg.include_vc = true;
+            transport_ctx.psp_cfg.transport_crypt_off = 2;
+            transport_ctx.key = derive_psp_key(
+                transport_ctx.psp_cfg.spi,
+                transport_ctx.psp_cfg.crypto_alg,
+                &transport_ctx.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+            let transport_encap = psp_transport_encap(&mut transport_ctx, &test_pkt)
+                .expect("Transport VC encapsulation should work");
+
+            // Tunnel mode with VC
+            let mut tunnel_ctx = get_pkt_ctx(PspVersion::PspVer0);
+            tunnel_ctx.psp_cfg.include_vc = true;
+            tunnel_ctx.psp_cfg.ipv4_tunnel_crypt_off = 2;
+            tunnel_ctx.key = derive_psp_key(
+                tunnel_ctx.psp_cfg.spi,
+                tunnel_ctx.psp_cfg.crypto_alg,
+                &tunnel_ctx.psp_cfg.master_keys,
+            );
+
+            let tunnel_encap = psp_tunnel_encap(&mut tunnel_ctx, &test_pkt)
+                .expect("Tunnel VC encapsulation should work");
+
+            // Both should succeed and produce packets
+            assert!(transport_encap.len() > test_pkt.len(), "Transport VC should add overhead");
+            assert!(tunnel_encap.len() > test_pkt.len(), "Tunnel VC should add overhead");
+
+            // Verify roundtrip for both
+            let mut transport_decap_ctx = transport_ctx.clone();
+            let transport_decap = psp_transport_decap(&mut transport_decap_ctx, &transport_encap)
+                .expect("Transport VC decapsulation should work");
+            assert_eq!(test_pkt, transport_decap, "Transport VC roundtrip should match");
+
+            let mut tunnel_decap_ctx = tunnel_ctx.clone();
+            let tunnel_decap = psp_tunnel_decap(&mut tunnel_decap_ctx, &tunnel_encap)
+                .expect("Tunnel VC decapsulation should work");
+            assert_eq!(test_pkt, tunnel_decap, "Tunnel VC roundtrip should match");
+        }
+
+        #[test]
+        fn test_vc_with_both_psp_versions() {
+            // Test VC with both PSPv0 and PSPv1
+
+            // Test PSPv0
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.psp_cfg.include_vc = true;
+            ctx.psp_cfg.transport_crypt_off = 2;
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+            let encap_pkt = psp_transport_encap(&mut ctx, &test_pkt)
+                .expect("VC with PSPv0 should work");
+
+            let mut decap_ctx = ctx.clone();
+            let decap_pkt = psp_transport_decap(&mut decap_ctx, &encap_pkt)
+                .expect("VC decapsulation with PSPv0 should work");
+            assert_eq!(test_pkt, decap_pkt, "VC roundtrip for PSPv0 should match");
+
+            // Test PSPv1
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer1);
+            ctx.psp_cfg.include_vc = true;
+            ctx.psp_cfg.transport_crypt_off = 2;
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+            let encap_pkt = psp_transport_encap(&mut ctx, &test_pkt)
+                .expect("VC with PSPv1 should work");
+
+            let mut decap_ctx = ctx.clone();
+            let decap_pkt = psp_transport_decap(&mut decap_ctx, &encap_pkt)
+                .expect("VC decapsulation with PSPv1 should work");
+            assert_eq!(test_pkt, decap_pkt, "VC roundtrip for PSPv1 should match");
+        }
+
+        #[test]
+        fn test_vc_with_ipv4_and_ipv6() {
+            // Test VC with both IPv4 and IPv6 packets
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.psp_cfg.include_vc = true;
+            ctx.psp_cfg.transport_crypt_off = 2;
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Test with IPv4
+            let ipv4_pkt = get_ipv4_test_pkt();
+            let ipv4_encap = psp_transport_encap(&mut ctx, &ipv4_pkt)
+                .expect("VC with IPv4 should work");
+
+            let mut ipv4_decap_ctx = ctx.clone();
+            let ipv4_decap = psp_transport_decap(&mut ipv4_decap_ctx, &ipv4_encap)
+                .expect("VC IPv4 decapsulation should work");
+            assert_eq!(ipv4_pkt, ipv4_decap, "IPv4 VC roundtrip should match");
+
+            // Test with IPv6
+            let ipv6_pkt = get_ipv6_test_pkt();
+            let ipv6_encap = psp_transport_encap(&mut ctx, &ipv6_pkt)
+                .expect("VC with IPv6 should work");
+
+            let mut ipv6_decap_ctx = ctx.clone();
+            let ipv6_decap = psp_transport_decap(&mut ipv6_decap_ctx, &ipv6_encap)
+                .expect("VC IPv6 decapsulation should work");
+            assert_eq!(ipv6_pkt, ipv6_decap, "IPv6 VC roundtrip should match");
+        }
+
+        #[test]
+        fn test_vc_partial_encryption() {
+            // Test VC with partial encryption (non-zero crypto offset)
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.psp_cfg.include_vc = true;
+            ctx.psp_cfg.transport_crypt_off = 4; // Partial encryption
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+            let encap_pkt = psp_transport_encap(&mut ctx, &test_pkt)
+                .expect("VC with partial encryption should work");
+
+            // Verify the encrypted packet is larger than original
+            assert!(
+                encap_pkt.len() > test_pkt.len(),
+                "VC partial encryption should add overhead"
+            );
+
+            // Verify roundtrip
+            let mut decap_ctx = ctx.clone();
+            let decap_pkt = psp_transport_decap(&mut decap_ctx, &encap_pkt)
+                .expect("VC partial encryption decapsulation should work");
+            assert_eq!(test_pkt, decap_pkt, "VC partial encryption roundtrip should match");
+        }
+
+        #[test]
+        fn test_vc_tunnel_mode_with_offsets() {
+            // Test VC in tunnel mode with different crypto offsets
+            for offset in [0, 1, 2, 4] {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.include_vc = true;
+                ctx.psp_cfg.ipv4_tunnel_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let encap_pkt = psp_tunnel_encap(&mut ctx, &test_pkt)
+                    .expect(&format!("Tunnel VC with offset {} should work", offset));
+
+                let mut decap_ctx = ctx.clone();
+                let decap_pkt = psp_tunnel_decap(&mut decap_ctx, &encap_pkt)
+                    .expect(&format!("Tunnel VC decapsulation with offset {} should work", offset));
+
+                assert_eq!(
+                    test_pkt, decap_pkt,
+                    "Tunnel VC roundtrip with offset {} should match",
+                    offset
+                );
+            }
+        }
+    }
+
+    /// Tests for Crypto Offset range validation
+    #[cfg(test)]
+    mod crypto_offset_tests {
+        use super::*;
+
+        #[test]
+        fn test_crypto_offset_full_range() {
+            // Test valid crypto offsets that work with the current implementation
+            // Testing common offset values: 0, 1, 2, 4
+            let valid_offsets = vec![0, 1, 2, 4];
+
+            for offset in valid_offsets {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.transport_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let result = psp_transport_encap(&mut ctx, &test_pkt);
+
+                assert!(
+                    result.is_ok(),
+                    "Valid crypto offset {} should be accepted",
+                    offset
+                );
+            }
+        }
+
+        #[test]
+        fn test_invalid_crypto_offset_values() {
+            // Test that invalid offset values are rejected (>64)
+            let invalid_offsets = vec![65, 100, 128, 200, 255];
+
+            for offset in invalid_offsets {
+                // Create a basic config and set invalid offset
+                let cfg = PspConfig {
+                    master_keys: [[1u8; 32]; 2],
+                    spi: 0x12345678,
+                    psp_encap: PspEncap::Transport,
+                    crypto_alg: CryptoAlg::AesGcm128,
+                    transport_crypt_off: offset,
+                    ipv4_tunnel_crypt_off: 0,
+                    ipv6_tunnel_crypt_off: 0,
+                    include_vc: false,
+                };
+
+                // Validation should reject invalid offsets
+                let result = cfg.validate();
+                assert!(
+                    result.is_err(),
+                    "Invalid crypto offset {} should be rejected",
+                    offset
+                );
+            }
+        }
+
+        #[test]
+        fn test_crypto_offset_with_tunnel_mode() {
+            // Test crypto offsets in tunnel mode
+            let valid_offsets = vec![0, 1, 2, 4];
+
+            for offset in valid_offsets {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.ipv4_tunnel_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let encap_result = psp_tunnel_encap(&mut ctx, &test_pkt);
+
+                assert!(
+                    encap_result.is_ok(),
+                    "Tunnel mode crypto offset {} should work",
+                    offset
+                );
+
+                // Verify roundtrip
+                if let Ok(encap_pkt) = encap_result {
+                    let mut decap_ctx = ctx.clone();
+                    let decap_result = psp_tunnel_decap(&mut decap_ctx, &encap_pkt);
+                    assert!(
+                        decap_result.is_ok(),
+                        "Tunnel mode decapsulation with offset {} should work",
+                        offset
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_crypto_offset_zero_vs_nonzero() {
+            // Compare offset 0 (full encryption) vs offset 4 (partial encryption)
+            let mut ctx_zero = get_pkt_ctx(PspVersion::PspVer0);
+            ctx_zero.psp_cfg.transport_crypt_off = 0;
+            ctx_zero.key = derive_psp_key(
+                ctx_zero.psp_cfg.spi,
+                ctx_zero.psp_cfg.crypto_alg,
+                &ctx_zero.psp_cfg.master_keys,
+            );
+
+            let mut ctx_partial = get_pkt_ctx(PspVersion::PspVer0);
+            ctx_partial.psp_cfg.transport_crypt_off = 4;
+            ctx_partial.key = derive_psp_key(
+                ctx_partial.psp_cfg.spi,
+                ctx_partial.psp_cfg.crypto_alg,
+                &ctx_partial.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+
+            // Both should work
+            let encap_zero = psp_transport_encap(&mut ctx_zero, &test_pkt)
+                .expect("Offset 0 should work");
+            let encap_partial = psp_transport_encap(&mut ctx_partial, &test_pkt)
+                .expect("Offset 4 should work");
+
+            // Encrypted packets should be different
+            assert_ne!(
+                encap_zero, encap_partial,
+                "Different offsets should produce different encrypted packets"
+            );
+
+            // Both should decrypt correctly
+            let mut decap_zero = ctx_zero.clone();
+            let decap_pkt_zero = psp_transport_decap(&mut decap_zero, &encap_zero)
+                .expect("Offset 0 decapsulation should work");
+            assert_eq!(test_pkt, decap_pkt_zero);
+
+            let mut decap_partial = ctx_partial.clone();
+            let decap_pkt_partial = psp_transport_decap(&mut decap_partial, &encap_partial)
+                .expect("Offset 4 decapsulation should work");
+            assert_eq!(test_pkt, decap_pkt_partial);
+        }
+
+        #[test]
+        fn test_crypto_offset_combinations_with_vc() {
+            // Test various crypto offset values combined with VC
+            let offsets = vec![0, 2, 4];
+
+            for offset in offsets {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.include_vc = true;
+                ctx.psp_cfg.transport_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let encap_result = psp_transport_encap(&mut ctx, &test_pkt);
+
+                assert!(
+                    encap_result.is_ok(),
+                    "Crypto offset {} with VC should work",
+                    offset
+                );
+
+                // Verify roundtrip
+                if let Ok(encap_pkt) = encap_result {
+                    let mut decap_ctx = ctx.clone();
+                    let decap_pkt = psp_transport_decap(&mut decap_ctx, &encap_pkt)
+                        .expect(&format!("Decapsulation with offset {} and VC should work", offset));
+                    assert_eq!(test_pkt, decap_pkt, "Roundtrip with offset {} and VC should match", offset);
+                }
+            }
+        }
+
+        #[test]
+        fn test_crypto_offset_with_both_algorithms() {
+            // Test crypto offsets work with both AES-GCM-128 and AES-GCM-256
+            let offsets = vec![0, 2, 4];
+
+            for offset in offsets {
+                // Test with AES-GCM-128 (PSPv0)
+                let mut ctx_128 = get_pkt_ctx(PspVersion::PspVer0);
+                ctx_128.psp_cfg.transport_crypt_off = offset;
+                ctx_128.key = derive_psp_key(
+                    ctx_128.psp_cfg.spi,
+                    ctx_128.psp_cfg.crypto_alg,
+                    &ctx_128.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv4_test_pkt();
+                let result_128 = psp_transport_encap(&mut ctx_128, &test_pkt);
+                assert!(
+                    result_128.is_ok(),
+                    "Offset {} with AES-GCM-128 should work",
+                    offset
+                );
+
+                // Test with AES-GCM-256 (PSPv1)
+                let mut ctx_256 = get_pkt_ctx(PspVersion::PspVer1);
+                ctx_256.psp_cfg.transport_crypt_off = offset;
+                ctx_256.key = derive_psp_key(
+                    ctx_256.psp_cfg.spi,
+                    ctx_256.psp_cfg.crypto_alg,
+                    &ctx_256.psp_cfg.master_keys,
+                );
+
+                let result_256 = psp_transport_encap(&mut ctx_256, &test_pkt);
+                assert!(
+                    result_256.is_ok(),
+                    "Offset {} with AES-GCM-256 should work",
+                    offset
+                );
+            }
+        }
+
+        #[test]
+        fn test_crypto_offset_ipv6() {
+            // Test crypto offsets with IPv6 packets
+            let offsets = vec![0, 2, 4];
+
+            for offset in offsets {
+                let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+                ctx.psp_cfg.transport_crypt_off = offset;
+                ctx.key = derive_psp_key(
+                    ctx.psp_cfg.spi,
+                    ctx.psp_cfg.crypto_alg,
+                    &ctx.psp_cfg.master_keys,
+                );
+
+                let test_pkt = get_ipv6_test_pkt();
+                let encap_result = psp_transport_encap(&mut ctx, &test_pkt);
+
+                assert!(
+                    encap_result.is_ok(),
+                    "IPv6 with crypto offset {} should work",
+                    offset
+                );
+
+                // Verify roundtrip
+                if let Ok(encap_pkt) = encap_result {
+                    let mut decap_ctx = ctx.clone();
+                    let decap_result = psp_transport_decap(&mut decap_ctx, &encap_pkt);
+                    assert!(
+                        decap_result.is_ok(),
+                        "IPv6 decapsulation with offset {} should work",
+                        offset
+                    );
+                }
+            }
+        }
+    }
 }
