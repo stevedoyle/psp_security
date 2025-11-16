@@ -2768,4 +2768,293 @@ mod tests {
             assert!(result.is_err(), "Decryption with corrupted ICV should fail");
         }
     }
+
+    // Edge case and boundary tests
+    mod edge_case_tests {
+        use super::*;
+
+        #[test]
+        fn test_minimum_packet_size() {
+            // Test with smallest possible PSP packet
+            // Minimum: Ethernet(14) + IP(20) + PSP header(12) + ICV(16) = 62 bytes minimum
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+
+            // Create minimal IPv4 packet with no payload
+            let minimal_pkt = get_ipv4_empty_test_pkt();
+
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Should handle minimal packet
+            let encap_result = psp_transport_encap(&mut ctx, &minimal_pkt);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle minimum size packet in transport mode"
+            );
+
+            let tunnel_result = psp_tunnel_encap(&mut ctx, &minimal_pkt);
+            assert!(
+                tunnel_result.is_ok(),
+                "Should handle minimum size packet in tunnel mode"
+            );
+        }
+
+        #[test]
+        fn test_large_packet_size() {
+            // Test with larger packet (simulating near-MTU size)
+            // Standard MTU is 1500 bytes
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Create a packet with 1400 bytes of payload
+            let large_payload = vec![0x41u8; 1400];
+            let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+                .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 64)
+                .udp(1234, 5678);
+
+            let mut pkt_buf = Vec::new();
+            builder
+                .write(&mut pkt_buf, &large_payload)
+                .expect("Failed to build packet");
+
+            // Should handle large packet
+            let encap_result = psp_transport_encap(&mut ctx, &pkt_buf);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle large packet in transport mode"
+            );
+        }
+
+        #[test]
+        fn test_jumbo_frame_size() {
+            // Test with jumbo frame size (9000 bytes)
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Create a packet with ~8900 bytes of payload (jumbo frame)
+            let jumbo_payload = vec![0x42u8; 8900];
+            let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+                .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 64)
+                .udp(1234, 5678);
+
+            let mut pkt_buf = Vec::new();
+            builder
+                .write(&mut pkt_buf, &jumbo_payload)
+                .expect("Failed to build jumbo packet");
+
+            // Should handle jumbo frame
+            let encap_result = psp_transport_encap(&mut ctx, &pkt_buf);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle jumbo frame in transport mode"
+            );
+        }
+
+        #[test]
+        fn test_mtu_boundary_packet_1500() {
+            // Test with packet at exactly standard MTU (1500 bytes)
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Create packet that will be exactly 1500 bytes
+            // Ethernet(14) + IP(20) + UDP(8) = 42 bytes header
+            // So payload should be 1500 - 42 = 1458 bytes
+            let mtu_payload = vec![0x43u8; 1458];
+            let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+                .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 64)
+                .udp(1234, 5678);
+
+            let mut pkt_buf = Vec::new();
+            builder
+                .write(&mut pkt_buf, &mtu_payload)
+                .expect("Failed to build MTU packet");
+
+            assert_eq!(pkt_buf.len(), 1500, "Packet should be exactly 1500 bytes");
+
+            // Should handle MTU-sized packet
+            let encap_result = psp_transport_encap(&mut ctx, &pkt_buf);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle MTU boundary packet"
+            );
+        }
+
+        #[test]
+        fn test_mtu_boundary_packet_1492() {
+            // Test with PPPoE MTU (1492 bytes)
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            // Payload for 1492 byte total packet
+            let pppoe_payload = vec![0x44u8; 1450];
+            let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+                .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 64)
+                .udp(1234, 5678);
+
+            let mut pkt_buf = Vec::new();
+            builder
+                .write(&mut pkt_buf, &pppoe_payload)
+                .expect("Failed to build PPPoE MTU packet");
+
+            // Should handle PPPoE MTU packet
+            let encap_result = psp_transport_encap(&mut ctx, &pkt_buf);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle PPPoE MTU boundary packet"
+            );
+        }
+
+        #[test]
+        fn test_ipv6_minimum_packet() {
+            // Test minimum IPv6 packet
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let ipv6_pkt = get_ipv6_test_pkt();
+
+            // Should handle IPv6 packet
+            let encap_result = psp_transport_encap(&mut ctx, &ipv6_pkt);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle IPv6 minimum packet"
+            );
+        }
+
+        #[test]
+        fn test_packet_with_zero_payload() {
+            // Test packet with exactly zero bytes of L4 payload
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let zero_payload_pkt = get_ipv4_empty_test_pkt();
+
+            // Encrypt and decrypt should work with zero payload
+            let encap_pkt = psp_transport_encap(&mut ctx, &zero_payload_pkt)
+                .expect("Should encapsulate zero payload packet");
+
+            let mut decap_ctx = ctx.clone();
+            let decap_pkt = psp_transport_decap(&mut decap_ctx, &encap_pkt)
+                .expect("Should decapsulate zero payload packet");
+
+            assert_eq!(
+                zero_payload_pkt, decap_pkt,
+                "Zero payload packet should roundtrip correctly"
+            );
+        }
+
+        #[test]
+        fn test_single_byte_payload() {
+            // Test packet with exactly 1 byte of payload
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let single_byte = vec![0xABu8];
+            let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+                .ipv4([192, 168, 1, 1], [192, 168, 1, 2], 64)
+                .udp(1234, 5678);
+
+            let mut pkt_buf = Vec::new();
+            builder
+                .write(&mut pkt_buf, &single_byte)
+                .expect("Failed to build single byte packet");
+
+            // Should handle 1-byte payload packet
+            let encap_result = psp_transport_encap(&mut ctx, &pkt_buf);
+            assert!(
+                encap_result.is_ok(),
+                "Should handle single byte payload packet"
+            );
+        }
+
+        #[test]
+        fn test_malformed_ethernet_header() {
+            // Test with corrupted Ethernet header
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+
+            // Create packet with truncated Ethernet header (only 10 bytes instead of 14)
+            let malformed_pkt = vec![0u8; 10];
+
+            let result = psp_transport_encap(&mut ctx, &malformed_pkt);
+            assert!(
+                result.is_err(),
+                "Should reject packet with malformed Ethernet header"
+            );
+        }
+
+        #[test]
+        fn test_truncated_ip_header() {
+            // Test with truncated IP header
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+
+            // Create Ethernet header + partial IP header (only 10 bytes of IP instead of 20)
+            let mut truncated_pkt = vec![0u8; 14]; // Ethernet header
+            truncated_pkt.extend_from_slice(&[0x45, 0x00, 0x00, 0x14]); // Partial IP header
+
+            let result = psp_transport_encap(&mut ctx, &truncated_pkt);
+            assert!(
+                result.is_err(),
+                "Should reject packet with truncated IP header"
+            );
+        }
+
+        #[test]
+        fn test_crypto_offset_zero() {
+            // Test crypto offset 0 (no offset) which is the most common case
+            let mut ctx = get_pkt_ctx(PspVersion::PspVer0);
+            ctx.key = derive_psp_key(
+                ctx.psp_cfg.spi,
+                ctx.psp_cfg.crypto_alg,
+                &ctx.psp_cfg.master_keys,
+            );
+
+            let test_pkt = get_ipv4_test_pkt();
+
+            // Test with offset 0 (no offset)
+            ctx.psp_cfg.transport_crypt_off = 0;
+            let result = psp_transport_encap(&mut ctx, &test_pkt);
+            assert!(
+                result.is_ok(),
+                "Should handle crypto offset of 0"
+            );
+
+            // Test with offset 2 (common case tested elsewhere)
+            ctx.psp_cfg.transport_crypt_off = 2;
+            let result = psp_transport_encap(&mut ctx, &test_pkt);
+            assert!(
+                result.is_ok(),
+                "Should handle crypto offset of 2"
+            );
+        }
+    }
 }
